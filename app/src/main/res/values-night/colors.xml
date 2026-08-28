@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#7FB0F0</color>
+    <color name="on_brand">#08243F</color>
+    <color name="quality_good">#5FD08A</color>
+    <color name="quality_weak">#EFC05A</color>
+    <color name="quality_lost">#F08A8A</color>
+    <color name="quality_idle">#9C9B95</color>
+    <color name="track">#7FB0F0</color>
+    <color name="track_imu">#F09A76</color>
+</resources>

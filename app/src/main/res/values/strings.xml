@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IMU Logger</string>
+    <string name="channel_name">Recording session</string>
+    <string name="channel_description">Shown while sensor and GNSS data is being recorded.</string>
+    <string name="notif_title">IMU Logger is recording</string>
+    <string name="notif_stop">Stop</string>
+    <string name="idle">Idle</string>
+    <string name="recording">Recording</string>
+    <string name="start">Start recording</string>
+    <string name="stop">Stop recording</string>
+    <string name="grant_permissions">Grant location permission</string>
+    <string name="offline">Offline</string>
+    <string name="online">Online</string>
+    <string name="centre_on_position">Centre on position</string>
+    <string name="gnss_good">GNSS good</string>
+    <string name="gnss_weak">GNSS weak</string>
+    <string name="gnss_lost">GNSS lost</string>
+    <string name="gnss_idle">GNSS idle</string>
+    <string name="preload">Preload</string>
+    <string name="free_run">Free-run (simulate tunnel)</string>
+    <string name="free_run_on">Free-running on IMU</string>
+    <string name="legend_gps">GPS</string>
+    <string name="legend_imu">IMU only</string>
+    <string name="drift">drift</string>
+</resources>

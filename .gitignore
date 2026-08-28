@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+build/
+/local.properties
+/.idea/
+/captures
+.externalNativeBuild
+.cxx
+.DS_Store
+
+# Exclude large data files
+extracted_sessions/
+*.map

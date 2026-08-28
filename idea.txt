@@ -1,0 +1,6 @@
+so, i want to build an app that uses AI algorithm to sense the position of a travelling vehicle using the internal IMU of a mobile device. 
+as of now, lets build an app that gets its information from the embedded gyroscope, gps, magnetometer, and accelerometer from my samsung galaxy S21fe smartphone and using a kalman filter to track the position of the smartphone while we are moving in a vehicle and when the vehicle goes through a tunnel, then have a higher trust score with the imu but outside of the tunner trust the gps more.
+
+and an AI algorithm to snap the vehicle position to the roadmap of an offline map. 
+
+so for now, lets just build the wrapper so that it extracts information from the phone and transforms it into a data that can be analysed and put into the AI algorithm on device.
