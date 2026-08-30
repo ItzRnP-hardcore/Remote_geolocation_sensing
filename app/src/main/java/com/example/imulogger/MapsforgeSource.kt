@@ -50,11 +50,11 @@ object MapsforgeSource {
             }
             var source: MapsForgeTileSource? = null
             try {
-                // Use the built-in theme which has all patterns and symbols
-                val theme = org.mapsforge.map.rendertheme.InternalRenderTheme.OSMARENDER
-                source = MapsForgeTileSource.createFromFiles(files.toTypedArray(), theme, "osmarender")
+                // Use the custom theme that has the city text size reduced
+                val theme = org.mapsforge.map.android.rendertheme.AssetsRenderTheme(context.applicationContext.assets, "", "custom_theme.xml")
+                source = MapsForgeTileSource.createFromFiles(files.toTypedArray(), theme, "custom_theme")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load InternalRenderTheme, falling back to default", e)
+                Log.e(TAG, "Failed to load custom render theme, falling back to default", e)
                 source = MapsForgeTileSource.createFromFiles(files.toTypedArray())
             }
             
