@@ -11,7 +11,7 @@ import java.io.FileOutputStream
 class IMUModelRunner(context: Context) {
     private var module: Module? = null
     private val sequenceLength = 50
-    private val numFeatures = 6
+    private val numFeatures = 8
     private val imuBuffer = mutableListOf<FloatArray>()
 
     init {
@@ -21,11 +21,15 @@ class IMUModelRunner(context: Context) {
     }
 
     /**
-     * Feed new IMU data (ax, ay, az, gx, gy, gz) into the model's sliding window buffer.
-     * Returns the predicted compensation (lat_offset, lon_offset) if buffer is full, else null.
+     * Feed new processed IMU data (earth_ax, earth_ay, earth_az, gx, gy, gz, gps_speed, gps_bearing)
+     * Returns the predicted compensation (delta_v, delta_theta) if buffer is full, else null.
      */
-    fun processIMUData(ax: Float, ay: Float, az: Float, gx: Float, gy: Float, gz: Float): FloatArray? {
-        imuBuffer.add(floatArrayOf(ax, ay, az, gx, gy, gz))
+    fun processIMUData(
+        eax: Float, eay: Float, eaz: Float,
+        gx: Float, gy: Float, gz: Float,
+        speed: Float, bearing: Float
+    ): FloatArray? {
+        imuBuffer.add(floatArrayOf(eax, eay, eaz, gx, gy, gz, speed, bearing))
         
         // Keep only the last `sequenceLength` items
         if (imuBuffer.size > sequenceLength) {
@@ -49,7 +53,7 @@ class IMUModelRunner(context: Context) {
                 }
             }
 
-            // Create tensor of shape (1, 50, 6)
+            // Create tensor of shape (1, 50, 8)
             val tensor = Tensor.fromBlob(flatArray, longArrayOf(1, sequenceLength.toLong(), numFeatures.toLong()))
 
             // Run inference

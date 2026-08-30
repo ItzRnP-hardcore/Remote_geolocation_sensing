@@ -35,9 +35,9 @@ def train_model():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     # Initialize the model
-    # Input size is 6 (ax, ay, az, gx, gy, gz)
-    # Output size is 2 (e.g., target location/velocity variables to correct)
-    model = IMUBiasCompensator(input_size=6, hidden_size=64, num_layers=2, output_size=2).to(device)
+    # Input size is 8 (Earth-Accel x3, Gyro x3, Speed x1, Bearing x1)
+    # Output size is 2 (delta_v, delta_theta)
+    model = IMUBiasCompensator(input_size=8, hidden_size=64, num_layers=2, output_size=2).to(device)
     
     # Loss and optimizer
     criterion = nn.MSELoss()  # Mean Squared Error for regression

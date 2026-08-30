@@ -2,15 +2,15 @@ import torch
 import torch.nn as nn
 
 class IMUBiasCompensator(nn.Module):
-    def __init__(self, input_size=6, hidden_size=64, num_layers=2, output_size=2):
+    def __init__(self, input_size=8, hidden_size=64, num_layers=2, output_size=2):
         """
         LSTM-based model to learn and compensate for Bias Instability.
         
         Args:
-            input_size (int): Number of features (e.g., ax, ay, az, gx, gy, gz).
+            input_size (int): Number of features (e.g., Earth-Accel x3, Gyro x3, Speed x1, Bearing x1).
             hidden_size (int): Number of hidden units in LSTM.
             num_layers (int): Number of LSTM layers.
-            output_size (int): Number of target outputs (e.g., pos_x, pos_y).
+            output_size (int): Number of target outputs (delta_v, delta_theta).
         """
         super(IMUBiasCompensator, self).__init__()
         

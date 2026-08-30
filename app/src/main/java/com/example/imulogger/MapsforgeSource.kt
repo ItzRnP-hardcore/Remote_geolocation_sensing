@@ -48,32 +48,14 @@ object MapsforgeSource {
                 MapsForgeTileSource.createInstance(context.applicationContext as Application)
                 graphicsInitialised = true
             }
-            val source = MapsForgeTileSource.createFromFiles(files.toTypedArray())
-            
-            // Bruteforce Hack: The exact internal field name for tile size varies across versions.
-            // We search the entire class hierarchy of the tile source for any integer field 
-            // initialized to 256 (the default tile size) and bump it to 512. This doubles the 
-            // canvas size Mapsforge draws on, completely preventing mid-word text wrapping for cities, 
-            // while allowing us to use native text density so street names stay perfectly readable.
+            var source: MapsForgeTileSource? = null
             try {
-                var currentClass: Class<*>? = source.javaClass
-                while (currentClass != null) {
-                    for (field in currentClass.declaredFields) {
-                        if (field.type == Int::class.java || field.type == Int::class.javaPrimitiveType) {
-                            try {
-                                field.isAccessible = true
-                                if (field.getInt(source) == 256) {
-                                    field.setInt(source, 512)
-                                }
-                            } catch (e: Exception) {
-                                // Ignore access exceptions on irrelevant fields
-                            }
-                        }
-                    }
-                    currentClass = currentClass.superclass
-                }
+                // Use the built-in theme which has all patterns and symbols
+                val theme = org.mapsforge.map.rendertheme.InternalRenderTheme.OSMARENDER
+                source = MapsForgeTileSource.createFromFiles(files.toTypedArray(), theme, "osmarender")
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "Failed to load InternalRenderTheme, falling back to default", e)
+                source = MapsForgeTileSource.createFromFiles(files.toTypedArray())
             }
             
             map.tileProvider = MapsForgeTileProvider(SimpleRegisterReceiver(context), source, null)

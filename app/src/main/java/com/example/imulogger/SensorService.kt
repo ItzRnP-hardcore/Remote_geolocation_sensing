@@ -171,7 +171,13 @@ class SensorService : Service() {
     private lateinit var imuModelRunner: IMUModelRunner
     private val lastAccel = FloatArray(3)
     private val lastGyro = FloatArray(3)
+    private val lastMag = FloatArray(3)
+    private val lastGrav = FloatArray(3)
     private var modelReady = false
+    
+    // Calibration Logic
+    private var calibrationStartTimeNs = 0L
+    private var isCalibrating = true
 
     // Everything below is touched only on the logger thread.
     private var imuSamples: Long = 0
@@ -181,6 +187,7 @@ class SensorService : Service() {
     private var lastLat: Double? = null
     private var lastLon: Double? = null
     private var lastSpeed: Float? = null
+    private var lastBearing: Float? = null
     private var lastAccuracy: Float? = null
     private var satellitesVisible: Int = 0
     private var satellitesUsedInFix: Int = 0
@@ -440,12 +447,45 @@ class SensorService : Service() {
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             val label = sensorTypeLabels[event.sensor.type] ?: return
+            val nowNs = event.timestamp
+            
+            if (calibrationStartTimeNs == 0L) {
+                calibrationStartTimeNs = nowNs
+            }
+            val elapsedSec = (nowNs - calibrationStartTimeNs) / 1_000_000_000.0
+
+            when (event.sensor.type) {
+                Sensor.TYPE_ACCELEROMETER -> {
+                    lastAccel[0] = event.values[0]
+                    lastAccel[1] = event.values[1]
+                    lastAccel[2] = event.values[2]
+                }
+                Sensor.TYPE_GYROSCOPE -> {
+                    lastGyro[0] = event.values[0]
+                    lastGyro[1] = event.values[1]
+                    lastGyro[2] = event.values[2]
+                }
+                Sensor.TYPE_MAGNETIC_FIELD -> {
+                    lastMag[0] = event.values[0]
+                    lastMag[1] = event.values[1]
+                    lastMag[2] = event.values[2]
+                }
+                Sensor.TYPE_GRAVITY -> {
+                    lastGrav[0] = event.values[0]
+                    lastGrav[1] = event.values[1]
+                    lastGrav[2] = event.values[2]
+                }
+            }
+
+            if (elapsedSec < 15.0) {
+                // Drop events during the 5s stabilization and 10s orientation calibration phases.
+                return
+            } else {
+                isCalibrating = false
+            }
+
             val sb = rowBuilder
             sb.setLength(0)
-            // event.timestamp is already on the elapsedRealtimeNanos timebase. Stamping with
-            // System.currentTimeMillis() at write time instead records when the row was
-            // serialised, not when the sample was taken, and inherits every wall-clock
-            // correction that lands mid-drive.
             sb.append(event.timestamp).append(',')
                 .append(label).append(',')
                 .append(event.accuracy)
@@ -458,30 +498,37 @@ class SensorService : Service() {
             writeRow(imuWriter, sb)
             imuSamples++
             
-            // ML Integration: Track latest values and run model
-            if (modelReady && (event.sensor.type == Sensor.TYPE_ACCELEROMETER || event.sensor.type == Sensor.TYPE_GYROSCOPE)) {
-                if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-                    lastAccel[0] = event.values[0]
-                    lastAccel[1] = event.values[1]
-                    lastAccel[2] = event.values[2]
-                } else {
-                    lastGyro[0] = event.values[0]
-                    lastGyro[1] = event.values[1]
-                    lastGyro[2] = event.values[2]
+            // ML Integration: Run inference when gyro arrives
+            if (modelReady && event.sensor.type == Sensor.TYPE_GYROSCOPE) {
+                
+                // 1. Cancel gravity in device frame
+                val linAccX = lastAccel[0] - lastGrav[0]
+                val linAccY = lastAccel[1] - lastGrav[1]
+                val linAccZ = lastAccel[2] - lastGrav[2]
+                
+                // 2. Transform linear acc to Earth frame
+                val R = FloatArray(9)
+                val I = FloatArray(9)
+                if (SensorManager.getRotationMatrix(R, I, lastGrav, lastMag)) {
+                    // R is [H, M, A] rotation matrix. R * linAcc transforms to global frame
+                    val earthAccX = R[0] * linAccX + R[1] * linAccY + R[2] * linAccZ
+                    val earthAccY = R[3] * linAccX + R[4] * linAccY + R[5] * linAccZ
+                    val earthAccZ = R[6] * linAccX + R[7] * linAccY + R[8] * linAccZ
                     
-                    // Run inference when gyro arrives (using latest accel)
+                    val speed = lastSpeed ?: 0f
+                    val bearing = lastBearing ?: 0f
+                    
                     val correction = imuModelRunner.processIMUData(
-                        lastAccel[0], lastAccel[1], lastAccel[2],
-                        lastGyro[0], lastGyro[1], lastGyro[2]
+                        earthAccX, earthAccY, earthAccZ,
+                        lastGyro[0], lastGyro[1], lastGyro[2],
+                        speed, bearing
                     )
                     
-                    // If model outputs a correction, apply it to the DeadReckoner!
                     if (correction != null && correction.size == 2) {
-                        val latOffset = correction[0].toDouble()
-                        val lonOffset = correction[1].toDouble()
-                        // Extremely simplified application of ML offset to dead reckoner
-                        // In a real scenario, this would adjust the internal bias states
-                        deadReckoner.applyMLCorrection(latOffset * 0.0001, lonOffset * 0.0001)
+                        val deltaV = correction[0].toDouble()
+                        val deltaTheta = correction[1].toDouble()
+                        // Since this is delta speed and delta bearing, passing as lat/lon offsets is a simplification
+                        deadReckoner.applyMLCorrection(deltaV * 0.0001, deltaTheta * 0.0001)
                     }
                 }
             }
@@ -540,6 +587,7 @@ class SensorService : Service() {
         lastLat = location.latitude
         lastLon = location.longitude
         lastSpeed = if (location.hasSpeed()) location.speed else null
+        lastBearing = if (location.hasBearing()) location.bearing else null
         lastAccuracy = if (location.hasAccuracy()) location.accuracy else null
 
         trackPoints.add(TrackPoint(location.latitude, location.longitude))

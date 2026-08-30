@@ -5,7 +5,7 @@ from torch.utils.mobile_optimizer import optimize_for_mobile
 def export_to_mobile():
     # Load the trained model architecture
     print("Loading model architecture...")
-    model = IMUBiasCompensator(input_size=6, hidden_size=64, num_layers=2, output_size=2)
+    model = IMUBiasCompensator(input_size=8, hidden_size=64, num_layers=2, output_size=2)
     
     # Load the trained weights
     weight_path = "model_weights.pth"
@@ -19,8 +19,8 @@ def export_to_mobile():
 
     # Create dummy input for tracing (batch_size, sequence_length, features)
     # Using batch size of 1 for mobile inference
-    # Sequence length 50, features 6
-    example_input = torch.rand(1, 50, 6)
+    # Sequence length 50, features 8
+    example_input = torch.rand(1, 50, 8)
 
     # Trace the model
     print("Tracing model for TorchScript...")
