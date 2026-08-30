@@ -43,4 +43,8 @@ dependencies {
     // Pulls mapsforge 0.21.0 transitively. Do not force a newer mapsforge: this bridge was
     // compiled against 0.21 and the render-theme APIs changed after it.
     implementation("org.osmdroid:osmdroid-mapsforge:6.1.20")
+    
+    // PyTorch Android dependencies for ML inference
+    implementation("org.pytorch:pytorch_android_lite:2.1.0")
+    implementation("org.pytorch:pytorch_android_torchvision_lite:2.1.0")
 }

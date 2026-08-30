@@ -166,6 +166,12 @@ class SensorService : Service() {
     private var sessionDir: File? = null
     private var sessionId: String = ""
     private var sessionStartRealtimeNs: Long = 0
+    
+    // ML Model Integration
+    private lateinit var imuModelRunner: IMUModelRunner
+    private val lastAccel = FloatArray(3)
+    private val lastGyro = FloatArray(3)
+    private var modelReady = false
 
     // Everything below is touched only on the logger thread.
     private var imuSamples: Long = 0
@@ -203,6 +209,14 @@ class SensorService : Service() {
         loggerThread = HandlerThread("imu-logger", Process.THREAD_PRIORITY_FOREGROUND)
         loggerThread.start()
         loggerHandler = Handler(loggerThread.looper)
+        
+        // Initialize ML model runner
+        try {
+            imuModelRunner = IMUModelRunner(this)
+            modelReady = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load ML model", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -443,6 +457,38 @@ class SensorService : Service() {
             sb.append('\n')
             writeRow(imuWriter, sb)
             imuSamples++
+            
+            // ML Integration: Track latest values and run model
+            if (modelReady && (event.sensor.type == Sensor.TYPE_ACCELEROMETER || event.sensor.type == Sensor.TYPE_GYROSCOPE)) {
+                if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                    lastAccel[0] = event.values[0]
+                    lastAccel[1] = event.values[1]
+                    lastAccel[2] = event.values[2]
+                } else {
+                    lastGyro[0] = event.values[0]
+                    lastGyro[1] = event.values[1]
+                    lastGyro[2] = event.values[2]
+                    
+                    // Run inference when gyro arrives (using latest accel)
+                    val correction = imuModelRunner.processIMUData(
+                        lastAccel[0], lastAccel[1], lastAccel[2],
+                        lastGyro[0], lastGyro[1], lastGyro[2]
+                    )
+                    
+                    // If model outputs a correction, apply it to the DeadReckoner!
+                    if (correction != null && correction.size == 2) {
+                        val latOffset = correction[0].toDouble()
+                        val lonOffset = correction[1].toDouble()
+                        
+                        deadReckoner.position?.let { p ->
+                            // Extremely simplified application of ML offset to dead reckoner
+                            // In a real scenario, this would adjust the internal bias states
+                            p.lat += latOffset * 0.0001
+                            p.lon += lonOffset * 0.0001
+                        }
+                    }
+                }
+            }
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {

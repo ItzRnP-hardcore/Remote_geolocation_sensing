@@ -27,30 +27,38 @@
         android:layout_gravity="top"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingHorizontal="12dp"
-        android:paddingTop="48dp">
+        android:paddingHorizontal="16dp"
+        android:paddingTop="48dp"
+        android:paddingBottom="16dp"
+        android:background="#99000000">
 
         <TextView
             android:id="@+id/chipState"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:background="@drawable/bg_pill"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="8dp"
+            android:backgroundTint="#2E2E38"
+            android:textColor="#FFFFFF"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
             android:text="@string/idle"
-            android:textSize="13sp"
-            android:textStyle="bold" />
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:elevation="4dp" />
 
         <TextView
             android:id="@+id/chipGnss"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
+            android:layout_marginStart="10dp"
             android:background="@drawable/bg_pill"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="8dp"
+            android:backgroundTint="#2E2E38"
+            android:textColor="#A0A0A5"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
             android:text="@string/gnss_idle"
-            android:textSize="13sp" />
+            android:textSize="14sp"
+            android:elevation="4dp" />
 
         <Space
             android:layout_width="0dp"
@@ -61,22 +69,28 @@
             android:id="@+id/chipPreload"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="8dp"
+            android:layout_marginEnd="10dp"
             android:background="@drawable/bg_pill"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="8dp"
+            android:backgroundTint="#2E2E38"
+            android:textColor="#E0E0E5"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
             android:text="@string/preload"
-            android:textSize="13sp" />
+            android:textSize="14sp"
+            android:elevation="4dp" />
 
         <TextView
             android:id="@+id/chipOffline"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:background="@drawable/bg_pill"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="8dp"
+            android:backgroundTint="#2E2E38"
+            android:textColor="#E0E0E5"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="10dp"
             android:text="@string/offline"
-            android:textSize="13sp" />
+            android:textSize="14sp"
+            android:elevation="4dp" />
     </LinearLayout>
 
     <LinearLayout
@@ -99,15 +113,18 @@
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_margin="12dp"
-        app:cardCornerRadius="20dp"
-        app:cardElevation="6dp">
+        android:layout_margin="16dp"
+        app:cardCornerRadius="24dp"
+        app:cardElevation="8dp"
+        app:cardBackgroundColor="#CC1C1C1E"
+        app:strokeWidth="1dp"
+        app:strokeColor="#33FFFFFF">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="18dp">
+            android:padding="24dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -115,51 +132,54 @@
                 android:baselineAligned="false"
                 android:orientation="horizontal">
 
-                <LinearLayout style="@style/Metric">
-                    <TextView style="@style/Metric.Label" android:text="elapsed" />
-                    <TextView android:id="@+id/mElapsed" style="@style/Metric.Value" android:text="—" />
+                <LinearLayout style="@style/Metric" android:layout_weight="1">
+                    <TextView style="@style/Metric.Label" android:textColor="#A0A0A5" android:text="elapsed" />
+                    <TextView android:id="@+id/mElapsed" style="@style/Metric.Value" android:textColor="#FFFFFF" android:text="—" />
                 </LinearLayout>
 
-                <LinearLayout style="@style/Metric">
-                    <TextView style="@style/Metric.Label" android:text="imu" />
-                    <TextView android:id="@+id/mImu" style="@style/Metric.Value" android:text="—" />
+                <LinearLayout style="@style/Metric" android:layout_weight="1">
+                    <TextView style="@style/Metric.Label" android:textColor="#A0A0A5" android:text="imu" />
+                    <TextView android:id="@+id/mImu" style="@style/Metric.Value" android:textColor="#FFFFFF" android:text="—" />
                 </LinearLayout>
 
-                <LinearLayout style="@style/Metric">
-                    <TextView style="@style/Metric.Label" android:text="fixes" />
-                    <TextView android:id="@+id/mFixes" style="@style/Metric.Value" android:text="—" />
+                <LinearLayout style="@style/Metric" android:layout_weight="1">
+                    <TextView style="@style/Metric.Label" android:textColor="#A0A0A5" android:text="fixes" />
+                    <TextView android:id="@+id/mFixes" style="@style/Metric.Value" android:textColor="#FFFFFF" android:text="—" />
                 </LinearLayout>
 
-                <LinearLayout style="@style/Metric">
-                    <TextView style="@style/Metric.Label" android:text="sats" />
-                    <TextView android:id="@+id/mSats" style="@style/Metric.Value" android:text="—" />
+                <LinearLayout style="@style/Metric" android:layout_weight="1">
+                    <TextView style="@style/Metric.Label" android:textColor="#A0A0A5" android:text="sats" />
+                    <TextView android:id="@+id/mSats" style="@style/Metric.Value" android:textColor="#FFFFFF" android:text="—" />
                 </LinearLayout>
             </LinearLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
+                android:layout_marginTop="20dp"
                 android:baselineAligned="false"
                 android:orientation="horizontal">
 
-                <LinearLayout style="@style/Metric">
+                <LinearLayout style="@style/Metric" android:layout_weight="1.6">
                     <TextView
                         android:id="@+id/lblDrift"
                         style="@style/Metric.Label"
+                        android:textColor="#A0A0A5"
                         android:text="@string/drift" />
 
                     <TextView
                         android:id="@+id/mDrift"
                         style="@style/Metric.Value"
-                        android:textSize="24sp"
+                        android:textSize="28sp"
+                        android:textStyle="bold"
+                        android:textColor="#FFFFFF"
                         android:text="—" />
                 </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1.4"
+                    android:layout_weight="1"
                     android:orientation="vertical">
 
                     <TextView
@@ -167,15 +187,17 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/legend_gps"
-                        android:textSize="12sp" />
+                        android:textStyle="bold"
+                        android:textSize="13sp" />
 
                     <TextView
                         android:id="@+id/legendImu"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
+                        android:layout_marginTop="4dp"
                         android:text="@string/legend_imu"
-                        android:textSize="12sp" />
+                        android:textStyle="bold"
+                        android:textSize="13sp" />
                 </LinearLayout>
             </LinearLayout>
 
@@ -183,26 +205,32 @@
                 android:id="@+id/tvDetail"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp" />
+                android:layout_marginTop="16dp"
+                android:textColor="#808085"
+                android:textSize="13sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnRecord"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
+                android:layout_height="60dp"
+                android:layout_marginTop="24dp"
                 android:text="@string/start"
-                app:cornerRadius="14dp" />
+                android:textSize="16sp"
+                android:textStyle="bold"
+                app:cornerRadius="16dp"
+                app:backgroundTint="#0A84FF" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnFreeRun"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
+                android:layout_height="60dp"
+                android:layout_marginTop="12dp"
                 android:text="@string/free_run"
-                app:cornerRadius="14dp" />
+                android:textSize="16sp"
+                app:cornerRadius="16dp"
+                app:strokeColor="#404045"
+                android:textColor="#FFFFFF" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
