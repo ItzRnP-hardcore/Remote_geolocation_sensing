@@ -186,6 +186,16 @@ class DeadReckoner {
         vU = 0.0
     }
 
+    /** Apply corrections predicted by the ML Model directly to internal states. */
+    fun applyMLCorrection(latOffset: Double, lonOffset: Double) {
+        if (initialised) {
+            val dN = latOffset * mPerDegLat
+            val dE = lonOffset * mPerDegLon
+            pN += dN
+            pE += dE
+        }
+    }
+
     private fun setOrigin(lat: Double, lon: Double) {
         originLat = lat
         originLon = lon

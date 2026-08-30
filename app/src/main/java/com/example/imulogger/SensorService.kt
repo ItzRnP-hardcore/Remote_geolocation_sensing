@@ -479,13 +479,9 @@ class SensorService : Service() {
                     if (correction != null && correction.size == 2) {
                         val latOffset = correction[0].toDouble()
                         val lonOffset = correction[1].toDouble()
-                        
-                        deadReckoner.position?.let { p ->
-                            // Extremely simplified application of ML offset to dead reckoner
-                            // In a real scenario, this would adjust the internal bias states
-                            p.lat += latOffset * 0.0001
-                            p.lon += lonOffset * 0.0001
-                        }
+                        // Extremely simplified application of ML offset to dead reckoner
+                        // In a real scenario, this would adjust the internal bias states
+                        deadReckoner.applyMLCorrection(latOffset * 0.0001, lonOffset * 0.0001)
                     }
                 }
             }
