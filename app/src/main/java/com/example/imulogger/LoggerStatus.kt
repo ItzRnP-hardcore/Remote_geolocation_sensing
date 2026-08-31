@@ -46,6 +46,9 @@ data class LoggerStatus(
 
     /** The integrator believes the vehicle is stopped, so a zero-velocity update is being applied. */
     val stationary: Boolean = false,
+
+    /** Current orientation of the device in degrees (compass heading) */
+    val deviceAzimuth: Float? = null,
 ) {
     /**
      * How much the fusion stage should trust GNSS right now. Derived here rather than in the UI so

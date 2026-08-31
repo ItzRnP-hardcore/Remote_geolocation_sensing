@@ -171,6 +171,34 @@ class MainActivity : AppCompatActivity() {
         locationOverlay.setPersonIcon(blueDot)
         locationOverlay.setPersonHotspot(center, center)
         
+        // Custom arrow for directional location
+        val arrowBitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val arrowCanvas = android.graphics.Canvas(arrowBitmap)
+        val arrowPath = android.graphics.Path().apply {
+            moveTo(size / 2f, 0f) // Top tip (North)
+            lineTo(size.toFloat(), size.toFloat()) // Bottom right
+            lineTo(size / 2f, size * 0.75f) // Bottom center indent
+            lineTo(0f, size.toFloat()) // Bottom left
+            close()
+        }
+        arrowCanvas.drawPath(arrowPath, paint)
+        arrowCanvas.drawPath(arrowPath, borderPaint)
+        
+        try {
+            locationOverlay.setDirectionIcon(arrowBitmap)
+            locationOverlay.setPersonHotspot(center, center)
+            locationOverlay.setDirectionAnchor(center, center)
+        } catch (e: Exception) {
+            // Method might be deprecated or unsupported in some versions, fallback to setDirectionArrow if needed
+            try {
+                // Suppressing deprecation because it's the fallback
+                @Suppress("DEPRECATION")
+                locationOverlay.setDirectionArrow(blueDot, arrowBitmap)
+            } catch (e2: Exception) {
+                // Ignore
+            }
+        }
+        
         locationOverlay.enableMyLocation()
         overlays.add(locationOverlay)
 
@@ -493,6 +521,12 @@ class MainActivity : AppCompatActivity() {
             binding.tvDetail.text = status.error
                 ?: status.sessionPath?.let { "Last session: " + it.substringAfterLast('/') }
                 ?: "Sessions are written to Android/data/$packageName/files/sessions/"
+        }
+        
+        // Rotate the marker to point in the direction the device is pointing
+        status.deviceAzimuth?.let { azimuth ->
+            marker.rotation = -azimuth // osmdroid rotations might need negation based on the map's orientation, we'll try -azimuth or azimuth
+            drMarker.rotation = -azimuth
         }
     }
 

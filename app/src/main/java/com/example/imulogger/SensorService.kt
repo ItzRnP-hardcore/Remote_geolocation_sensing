@@ -510,6 +510,12 @@ class SensorService : Service() {
                 val R = FloatArray(9)
                 val I = FloatArray(9)
                 if (SensorManager.getRotationMatrix(R, I, lastGrav, lastMag)) {
+                    // Calculate the device's compass azimuth (heading)
+                    val orientationAngles = FloatArray(3)
+                    SensorManager.getOrientation(R, orientationAngles)
+                    // Convert from radians to degrees (-180 to 180).
+                    val azimuth = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+
                     // R is [H, M, A] rotation matrix. R * linAcc transforms to global frame
                     val earthAccX = R[0] * linAccX + R[1] * linAccY + R[2] * linAccZ
                     val earthAccY = R[3] * linAccX + R[4] * linAccY + R[5] * linAccZ
@@ -530,6 +536,9 @@ class SensorService : Service() {
                         // Since this is delta speed and delta bearing, passing as lat/lon offsets is a simplification
                         deadReckoner.applyMLCorrection(deltaV * 0.0001, deltaTheta * 0.0001)
                     }
+                    
+                    // Report azimuth back to UI
+                    _status.value = _status.value.copy(deviceAzimuth = azimuth)
                 }
             }
         }

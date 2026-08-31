@@ -1,12 +1,14 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="22dp"
-    android:height="22dp"
+    android:width="24dp"
+    android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+    <!-- White border -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M12,2a10,10 0,1 0,0.1 0z" />
+        android:pathData="M12,2 L22,20 L12,16 L2,20 Z" />
+    <!-- Blue/brand inner arrow -->
     <path
         android:fillColor="@color/brand"
-        android:pathData="M12,4a8,8 0,1 0,0.1 0z" />
+        android:pathData="M12,4 L19.5,18 L12,15 L4.5,18 Z" />
 </vector>

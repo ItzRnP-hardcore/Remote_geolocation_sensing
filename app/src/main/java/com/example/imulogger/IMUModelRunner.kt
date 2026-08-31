@@ -65,9 +65,7 @@ class IMUModelRunner(context: Context) {
 
     private fun assetFilePath(context: Context, assetName: String): String {
         val file = File(context.filesDir, assetName)
-        if (file.exists() && file.length() > 0) {
-            return file.absolutePath
-        }
+        // Always overwrite to ensure the latest model from the APK is used
         context.assets.open(assetName).use { `is` ->
             FileOutputStream(file).use { os ->
                 val buffer = ByteArray(4 * 1024)
