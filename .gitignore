@@ -14,6 +14,11 @@ build/
 __pycache__/
 *.pyc
 
+# Third-party papers: kept locally for reference, not redistributed from a
+# public repo. The team's own execution plan is the exception.
+research/*.pdf
+!research/IDR_Hackathon_Execution_Plan_v3.pdf
+
 # Large data files
 extracted_sessions/
 dataset/
