@@ -108,6 +108,22 @@ adb push eastern-zone.map /sdcard/Android/data/com.example.imulogger/files/osmdr
 When vector maps are present the app frames them on launch, so you can confirm the file loaded
 before you have a fix.
 
+### The map is not in the repo
+
+`eastern-zone.map` is 210 MB. GitHub rejects any blob over 100 MB, and Git LFS's free tier is
+1 GB of storage *and* 1 GB of bandwidth per month — four clones of a 210 MB file exhausts the
+monthly allowance and then blocks everyone's pushes until it resets. So the map is distributed
+as a release asset (2 GB limit, no bandwidth quota, and it stays out of everyone's clone).
+
+```bash
+gh release download maps-v1 -p eastern-zone.map
+adb push eastern-zone.map /sdcard/Android/data/com.example.imulogger/files/osmdroid/
+```
+
+The app checks that directory before anything else and only falls back to raster tiles when no
+`.map` file is there, so a side-loaded map and a bundled one behave identically. To bundle it into
+the APK instead, drop it in `app/src/main/assets/` — at the cost of a 466 MB APK on every install.
+
 ### Where to get `.map` files
 
 `download.mapsforge.org/maps/v5/` publishes free per-region builds. India is split into zones
