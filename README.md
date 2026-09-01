@@ -29,6 +29,7 @@ One directory per session under
 | `gps.csv` | `t_ns,utc_ms,provider,lat,lon,alt_m,speed_mps,bearing_deg,acc_m,vert_acc_m,speed_acc_mps,bearing_acc_deg` |
 | `gnss_status.csv` | `t_ns,sats_visible,sats_used,mean_cn0_used_dbhz,max_cn0_dbhz` |
 | `deadreckon.csv` | `t_ns,lat,lon,speed_mps,drift_m,bias_e,bias_n,bias_u,stationary,free_run` at 10 Hz |
+| `ml.csv` | `t_ns,mu,logvar,stationary_logit,yaw_rate` at 10 Hz — model outputs, observation only |
 | `session.json` | Device, per-sensor inventory (vendor, resolution, range, FIFO depth), clock sync, end-of-run summary |
 
 Pull a session with:
@@ -135,3 +136,47 @@ prohibited by the Platform Terms, and it requires a billing account regardless.
 The distinction that matters is between OSM **data** (ODbL, free, explicitly meant to be
 downloaded in bulk — Geofabrik, Mapsforge builds) and OSM's **public tile servers** (donated
 capacity, no bulk download). Only the second is restricted. Everything above uses OSM data.
+
+
+## Threading
+
+Three threads, with a deliberate single-writer rule.
+
+| Thread | Owns |
+| --- | --- |
+| main | UI only |
+| `imu-logger` | every sensor / location / GNSS callback, all file writes, the integrator |
+| `imu-ml` | model load and inference |
+
+Inference is posted to `imu-ml` and its result posted back to `imu-logger` to be written, so there
+is still exactly one thread touching the writers and no locking anywhere. Requests are dropped
+past `ML_MAX_PENDING` rather than queued — a backlog only yields staler predictions.
+
+Two things that must not regress: the model must not be loaded on the main thread (it materialises
+a 15 MB asset and builds a TorchScript module), and per-sensor-event writes to the status
+StateFlow must not come back. Gyro runs at 200 Hz; publishing from there allocates a status object
+and wakes the UI collector 200 times a second. Cache into a field, let the 2 s tick publish it.
+
+## Model outputs are observed, not consumed
+
+`ml.csv` records what the network predicts, and the UI shows it, but nothing in the navigation path
+acts on it yet. That is deliberate until `mu` has been validated against GNSS ground truth:
+
+- `mu` is trained against `speed_mps`, not displacement, despite the docstring in `resnet1d.py`.
+- `yaw_rate` is trained against a hardcoded `0.0` in `build_dataset.py` and is absent from the loss
+  in `train.py`, so that head carries no signal.
+- The training set is 304 windows with a maximum speed of 7.3 m/s (26 km/h) — no highway data.
+- Training levels acceleration with the fused `linear_accel` stream and the `rv` quaternion; the
+  app levels with `accel - gravity` and a magnetometer-derived rotation matrix. Closing that skew
+  is worth doing before trusting the numbers.
+
+When it is ready, couple it as a **velocity** update along the current heading, not a position
+offset — see the note where `applyMLCorrection` used to live in `DeadReckoner.kt`.
+
+## Open question for Task 4
+
+The execution plan has the Android app as a thin polling layer that pushes into a C++ engine's
+shared memory and reads a 10 Hz map-matched JSON payload back over a local WebSocket. This app
+instead does everything in-process in Kotlin. Both are defensible, but Tasks 2 and 3 are building
+against the plan's contract and there is currently no JNI boundary and no WebSocket client here.
+That needs a team decision before integration, not at merge time.

@@ -49,6 +49,16 @@ data class LoggerStatus(
 
     /** Current orientation of the device in degrees (compass heading) */
     val deviceAzimuth: Float? = null,
+
+    /**
+     * Latest model outputs, for observation only. Nothing in the navigation path consumes these
+     * yet: mu is trained against speed in m/s over a 10 s window, and until that is validated
+     * against GNSS ground truth it should not be allowed to move the position estimate.
+     */
+    val mlMu: Float = Float.NaN,
+    val mlStationaryProbability: Float = Float.NaN,
+    val mlInferences: Long = 0,
+    val mlDropped: Long = 0,
 ) {
     /**
      * How much the fusion stage should trust GNSS right now. Derived here rather than in the UI so

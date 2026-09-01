@@ -94,6 +94,15 @@ class SensorService : Service() {
         private const val MAX_REPORT_LATENCY_US = 1_000_000
 
         private const val FLUSH_INTERVAL_MS = 2_000L
+
+        /** The model was trained on 10 Hz windows, so it must be fed at 10 Hz. */
+        private const val ML_PERIOD_NS = 100_000_000L
+
+        /**
+         * Cap on inference requests queued behind a slow forward pass. Dropping a request costs
+         * one window update; letting the queue grow costs unbounded memory and ever-staler output.
+         */
+        private const val ML_MAX_PENDING = 8
         private const val WAKELOCK_TIMEOUT_MS = 12L * 60 * 60 * 1000
 
         private val _status = MutableStateFlow(LoggerStatus())
@@ -149,6 +158,16 @@ class SensorService : Service() {
     private lateinit var loggerThread: HandlerThread
     private lateinit var loggerHandler: Handler
 
+    /**
+     * Inference lives on its own thread. A forward pass through the ResNet takes tens of
+     * milliseconds; on the logger thread that would stall 200 Hz sensor delivery and the CSV
+     * writes, and on the main thread it would be an ANR.
+     */
+    private lateinit var mlThread: HandlerThread
+    private lateinit var mlHandler: Handler
+    private val mlPending = java.util.concurrent.atomic.AtomicInteger(0)
+    private var mlDropped: Long = 0
+
     private var wakeLock: PowerManager.WakeLock? = null
     private val registeredSensors = mutableListOf<Sensor>()
 
@@ -173,7 +192,8 @@ class SensorService : Service() {
     private val lastGyro = FloatArray(3)
     private val lastMag = FloatArray(3)
     private val lastGrav = FloatArray(3)
-    private var modelReady = false
+    /** Set on the ML thread once the module is loaded, read on the logger thread every gyro tick. */
+    @Volatile private var modelReady = false
     
     // Calibration Logic
     private var calibrationStartTimeNs = 0L
@@ -192,6 +212,28 @@ class SensorService : Service() {
     private var satellitesVisible: Int = 0
     private var satellitesUsedInFix: Int = 0
     private var meanCn0: Float = 0f
+    
+    // ML tracking
+    private var lastMLFeedTimeNanos: Long = 0L
+    private var mlWriter: BufferedWriter? = null
+
+    /**
+     * Reused across events. getRotationMatrix runs on every gyro sample, and allocating two
+     * FloatArray(9) plus a FloatArray(3) at 200 Hz is 600 short-lived objects a second.
+     */
+    private val rotationMatrix = FloatArray(9)
+    private val inclinationMatrix = FloatArray(9)
+    private val orientationAngles = FloatArray(3)
+
+    /** Written on the logger thread, read by the periodic publish. */
+    private var latestAzimuthDeg: Float = 0f
+
+    /** Latest model outputs, written on the ML thread and published on the periodic tick. */
+    @Volatile private var mlMu: Float = Float.NaN
+    @Volatile private var mlLogvar: Float = Float.NaN
+    @Volatile private var mlStationaryLogit: Float = Float.NaN
+    @Volatile private var mlYawRate: Float = Float.NaN
+    @Volatile private var mlInferences: Long = 0
 
     /** Reused so the hot path does not allocate a builder per sample. */
     private val rowBuilder = StringBuilder(160)
@@ -216,14 +258,72 @@ class SensorService : Service() {
         loggerThread = HandlerThread("imu-logger", Process.THREAD_PRIORITY_FOREGROUND)
         loggerThread.start()
         loggerHandler = Handler(loggerThread.looper)
-        
-        // Initialize ML model runner
-        try {
-            imuModelRunner = IMUModelRunner(this)
-            modelReady = true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load ML model", e)
+
+        mlThread = HandlerThread("imu-ml", Process.THREAD_PRIORITY_DEFAULT)
+        mlThread.start()
+        mlHandler = Handler(mlThread.looper)
+
+        // Loading the model materialises a 15 MB asset and builds a TorchScript module. Doing
+        // that inline in onCreate blocks the main thread for long enough to risk an ANR, so it
+        // happens on the ML thread and the service simply records nothing until it is ready.
+        mlHandler.post {
+            try {
+                imuModelRunner = IMUModelRunner(this)
+                modelReady = true
+                Log.i(TAG, "ML model ready")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load ML model; continuing without it", e)
+            }
         }
+    }
+
+    /**
+     * Hand one levelled sample to the model thread.
+     *
+     * Called on the logger thread at 10 Hz. Requests are dropped rather than queued without bound
+     * when inference falls behind, because a backlog only produces increasingly stale predictions.
+     */
+    private fun submitToModel(
+        tNs: Long,
+        eax: Float, eay: Float, eaz: Float,
+        gx: Float, gy: Float, gz: Float,
+    ) {
+        if (mlPending.get() >= ML_MAX_PENDING) {
+            mlDropped++
+            return
+        }
+        mlPending.incrementAndGet()
+        mlHandler.post {
+            try {
+                val out = imuModelRunner.processIMUData(eax, eay, eaz, gx, gy, gz) ?: return@post
+                val mu = out[IMUModelRunner.IDX_MU]
+                val logvar = out[IMUModelRunner.IDX_LOGVAR]
+                val stationary = out[IMUModelRunner.IDX_STATIONARY]
+                val yaw = out[IMUModelRunner.IDX_YAW_RATE]
+                mlMu = mu
+                mlLogvar = logvar
+                mlStationaryLogit = stationary
+                mlYawRate = yaw
+                mlInferences++
+                // Writing goes back to the logger thread so there stays exactly one writer and
+                // the no-locking invariant in this class holds.
+                loggerHandler.post { writeMlRow(tNs, mu, logvar, stationary, yaw) }
+            } finally {
+                mlPending.decrementAndGet()
+            }
+        }
+    }
+
+    /** Runs on the logger thread. */
+    private fun writeMlRow(tNs: Long, mu: Float, logvar: Float, stationary: Float, yaw: Float) {
+        val sb = rowBuilder
+        sb.setLength(0)
+        sb.append(tNs).append(',')
+            .append(mu).append(',')
+            .append(logvar).append(',')
+            .append(stationary).append(',')
+            .append(yaw).append('\n')
+        writeRow(mlWriter, sb)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -268,6 +368,14 @@ class SensorService : Service() {
             Log.w(TAG, "GNSS callback was not registered", e)
         }
 
+        mlHandler.removeCallbacksAndMessages(null)
+        mlThread.quitSafely()
+        try {
+            mlThread.join(2_000)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+
         loggerHandler.removeCallbacks(periodicTask)
         loggerHandler.post { closeSession() }
         loggerThread.quitSafely()
@@ -309,6 +417,12 @@ class SensorService : Service() {
         trackPoints.clear()
         drPoints.clear()
         deadReckoner.reset()
+        calibrationStartTimeNs = 0L
+        isCalibrating = true
+        lastMLFeedTimeNanos = 0L
+        mlDropped = 0
+        mlInferences = 0
+        if (modelReady) mlHandler.post { imuModelRunner.reset() }
         _track.value = emptyList()
         _drTrack.value = emptyList()
 
@@ -323,6 +437,9 @@ class SensorService : Service() {
 
         gnssWriter = openWriter(dir, "gnss_status.csv")
         gnssWriter?.write("t_ns,sats_visible,sats_used,mean_cn0_used_dbhz,max_cn0_dbhz\n")
+
+        mlWriter = openWriter(dir, "ml.csv")
+        mlWriter?.write("t_ns,mu,logvar,stationary_logit,yaw_rate\n")
 
         drWriter = openWriter(dir, "deadreckon.csv")
         drWriter?.write("t_ns,lat,lon,speed_mps,drift_m,bias_e,bias_n,bias_u,stationary,free_run\n")
@@ -345,7 +462,7 @@ class SensorService : Service() {
     /** Runs on the logger thread during shutdown. */
     private fun closeSession() {
         sessionDir?.let { writeSessionMetadata(it, finished = true) }
-        for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, drWriter)) {
+        for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, drWriter, mlWriter)) {
             try {
                 w.flush()
                 w.close()
@@ -357,6 +474,7 @@ class SensorService : Service() {
         gpsWriter = null
         gnssWriter = null
         drWriter = null
+        mlWriter = null
     }
 
     private fun openWriter(dir: File, name: String): BufferedWriter =
@@ -373,6 +491,7 @@ class SensorService : Service() {
                 gpsWriter?.flush()
                 gnssWriter?.flush()
                 drWriter?.flush()
+                mlWriter?.flush()
             } catch (e: Exception) {
                 writeErrors++
                 Log.e(TAG, "Flush failed", e)
@@ -416,6 +535,13 @@ class SensorService : Service() {
             driftMetres = deadReckoner.driftMetres,
             freeRun = freeRunRequested,
             stationary = deadReckoner.isStationary,
+            deviceAzimuth = latestAzimuthDeg,
+            mlMu = mlMu,
+            mlStationaryProbability =
+                if (mlStationaryLogit.isNaN()) Float.NaN
+                else 1f / (1f + kotlin.math.exp(-mlStationaryLogit)),
+            mlInferences = mlInferences,
+            mlDropped = mlDropped,
         )
     }
 
@@ -497,49 +623,56 @@ class SensorService : Service() {
             sb.append('\n')
             writeRow(imuWriter, sb)
             imuSamples++
-            
-            // ML Integration: Run inference when gyro arrives
-            if (modelReady && event.sensor.type == Sensor.TYPE_GYROSCOPE) {
-                
-                // 1. Cancel gravity in device frame
+
+            // Drive the strapdown integrator from the same events that reach disk, so replaying
+            // the CSV offline reproduces exactly what ran live. Without these three calls the
+            // DeadReckoner never integrates and its position is only ever the last GNSS anchor.
+            when (event.sensor.type) {
+                Sensor.TYPE_ACCELEROMETER -> {
+                    deadReckoner.onAccel(
+                        event.timestamp, event.values[0], event.values[1], event.values[2],
+                    )
+                    recordDeadReckoning(event.timestamp)
+                }
+                Sensor.TYPE_GYROSCOPE ->
+                    deadReckoner.onGyro(event.values[0], event.values[1], event.values[2])
+                Sensor.TYPE_ROTATION_VECTOR ->
+                    deadReckoner.onRotationVector(event.values)
+            }
+
+            // Levelling for the model runs on the gyro tick because gyro is the fastest stream
+            // that also has fresh accelerometer and gravity beside it.
+            if (event.sensor.type == Sensor.TYPE_GYROSCOPE) {
+                if (!SensorManager.getRotationMatrix(rotationMatrix, inclinationMatrix, lastGrav, lastMag)) {
+                    return
+                }
+                SensorManager.getOrientation(rotationMatrix, orientationAngles)
+                // Cached rather than published here: this runs at 200 Hz, and writing the status
+                // StateFlow per gyro event allocates a LoggerStatus and wakes the UI collector
+                // 200 times a second. The periodic tick publishes it instead.
+                latestAzimuthDeg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+
+                if (!modelReady) return
+
+                val now = event.timestamp
+                if (now - lastMLFeedTimeNanos < ML_PERIOD_NS) return
+                lastMLFeedTimeNanos = now
+
+                // Gravity-cancelled acceleration, rotated into the earth frame the model was
+                // trained in. NOTE: training used the fused linear_accel stream rotated by the
+                // rotation-vector quaternion, not this magnetometer-derived matrix — see the
+                // train/serve skew note in README.
                 val linAccX = lastAccel[0] - lastGrav[0]
                 val linAccY = lastAccel[1] - lastGrav[1]
                 val linAccZ = lastAccel[2] - lastGrav[2]
-                
-                // 2. Transform linear acc to Earth frame
-                val R = FloatArray(9)
-                val I = FloatArray(9)
-                if (SensorManager.getRotationMatrix(R, I, lastGrav, lastMag)) {
-                    // Calculate the device's compass azimuth (heading)
-                    val orientationAngles = FloatArray(3)
-                    SensorManager.getOrientation(R, orientationAngles)
-                    // Convert from radians to degrees (-180 to 180).
-                    val azimuth = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+                val earthAccX = rotationMatrix[0] * linAccX + rotationMatrix[1] * linAccY + rotationMatrix[2] * linAccZ
+                val earthAccY = rotationMatrix[3] * linAccX + rotationMatrix[4] * linAccY + rotationMatrix[5] * linAccZ
+                val earthAccZ = rotationMatrix[6] * linAccX + rotationMatrix[7] * linAccY + rotationMatrix[8] * linAccZ
 
-                    // R is [H, M, A] rotation matrix. R * linAcc transforms to global frame
-                    val earthAccX = R[0] * linAccX + R[1] * linAccY + R[2] * linAccZ
-                    val earthAccY = R[3] * linAccX + R[4] * linAccY + R[5] * linAccZ
-                    val earthAccZ = R[6] * linAccX + R[7] * linAccY + R[8] * linAccZ
-                    
-                    val speed = lastSpeed ?: 0f
-                    val bearing = lastBearing ?: 0f
-                    
-                    val correction = imuModelRunner.processIMUData(
-                        earthAccX, earthAccY, earthAccZ,
-                        lastGyro[0], lastGyro[1], lastGyro[2],
-                        speed, bearing
-                    )
-                    
-                    if (correction != null && correction.size == 2) {
-                        val deltaV = correction[0].toDouble()
-                        val deltaTheta = correction[1].toDouble()
-                        // Since this is delta speed and delta bearing, passing as lat/lon offsets is a simplification
-                        deadReckoner.applyMLCorrection(deltaV * 0.0001, deltaTheta * 0.0001)
-                    }
-                    
-                    // Report azimuth back to UI
-                    _status.value = _status.value.copy(deviceAzimuth = azimuth)
-                }
+                submitToModel(
+                    now, earthAccX, earthAccY, earthAccZ,
+                    lastGyro[0], lastGyro[1], lastGyro[2],
+                )
             }
         }
 

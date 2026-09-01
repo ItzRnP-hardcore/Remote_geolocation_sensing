@@ -14,6 +14,13 @@ android {
         versionName = "1.0"
     }
 
+    androidResources {
+        // Leave the Mapsforge map and the TorchScript model stored, not DEFLATE'd. Both are
+        // already compact binary formats, compressing them only inflates build time, and an
+        // uncompressed asset is the one form AssetManager.openFd can measure without a full read.
+        noCompress += listOf("map", "pt")
+    }
+
     buildFeatures {
         viewBinding = true
         buildConfig = true

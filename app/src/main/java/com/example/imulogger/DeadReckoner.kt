@@ -186,15 +186,21 @@ class DeadReckoner {
         vU = 0.0
     }
 
-    /** Apply corrections predicted by the ML Model directly to internal states. */
-    fun applyMLCorrection(latOffset: Double, lonOffset: Double) {
-        if (initialised) {
-            val dN = latOffset * mPerDegLat
-            val dE = lonOffset * mPerDegLon
-            pN += dN
-            pE += dE
-        }
-    }
+    // applyMLCorrection was removed deliberately. It took the model's mu - a displacement in
+    // METRES - and passed it where this class expects DEGREES, so every call overshot by a
+    // factor of about 11. It also added the same offset to both north and east regardless of
+    // heading, which drives the estimate northeast at 45 degrees no matter which way the vehicle
+    // points, and it accumulated at 10 Hz.
+    //
+    // When the model is trained and validated, the correct coupling is a velocity update along
+    // the current heading, not a position nudge: something like
+    //
+    //     fun applyModelSpeed(speedMps: Double) {
+    //         val h = atan2(vE, vN)
+    //         vE = speedMps * sin(h); vN = speedMps * cos(h)
+    //     }
+    //
+    // which is dimensionally sound and lets the existing integration carry it into position.
 
     private fun setOrigin(lat: Double, lon: Double) {
         originLat = lat

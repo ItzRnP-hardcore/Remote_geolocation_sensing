@@ -1,111 +1,99 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-from data_loader import get_dataloader, IMUDataset
-from model import IMUBiasCompensator
-import os
-import copy
+from torch.utils.data import TensorDataset, DataLoader
+from resnet1d import ResNet1D
+import time
 
-def train_model():
-    # Hyperparameters
-    batch_size = 64
-    learning_rate = 0.001
-    num_epochs = 100
-    window_size = 50
-    patience = 10 # Early stopping patience
-    
-    # Device configuration
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def train():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # Load data
+    print("Loading dataset...")
+    x, y = torch.load("dataset.pt", weights_only=True)
+    # x shape: (N, 6, 100), y shape: (N, 3) (speed_mps, stationary, yaw_rate)
     
-    # Initialize Dataset (Use real data once downloaded, or dummy for testing)
-    csv_path = '../dataset/IO-VNBD_original/Synchronised V abd S datasets/Categorised IOVNB Dataset/M (Driver B)/S-M.csv'
-    is_dummy = not os.path.exists(csv_path)
+    # We want to predict distance over next second. For 10Hz, speed_mps * 1s is roughly displacement.
+    # The network predicts logvar for Gaussian NLL, but let's just use standard MSE for the mean
+    # and BCE for stationary.
     
-    print(f"Loading data... (Using {'dummy' if is_dummy else 'real'} data)")
-    full_dataset = IMUDataset(csv_file=csv_path, window_size=window_size, is_dummy=is_dummy)
+    dataset = TensorDataset(x, y)
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
     
-    # Train/Validation Split (80/20)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
+
+    model = ResNet1D(in_channels=6).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    
-    # Initialize the model
-    # Input size is 8 (Earth-Accel x3, Gyro x3, Speed x1, Bearing x1)
-    # Output size is 2 (delta_v, delta_theta)
-    model = IMUBiasCompensator(input_size=8, hidden_size=64, num_layers=2, output_size=2).to(device)
-    
-    # Loss and optimizer
-    criterion = nn.MSELoss()  # Mean Squared Error for regression
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    
-    print("Starting iterative training...")
-    
+    # Loss functions
+    mse_loss = nn.MSELoss()
+    bce_loss = nn.BCEWithLogitsLoss()
+
+    epochs = 20
     best_val_loss = float('inf')
-    best_model_weights = copy.deepcopy(model.state_dict())
-    epochs_no_improve = 0
-    
-    for epoch in range(num_epochs):
-        # --- Training Phase ---
+
+    print("Starting training...")
+    for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        for features, targets in train_loader:
-            features = features.to(device)
-            targets = targets.to(device)
+        
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             
             optimizer.zero_grad()
-            outputs = model(features)
-            loss = criterion(outputs, targets)
+            
+            out = model(batch_x)
+            mu = out["mu"]
+            stat_logit = out["stationary_logit"]
+            
+            # True values
+            true_mu = batch_y[:, 0]
+            true_stat = batch_y[:, 1]
+            
+            # Losses
+            loss_mu = mse_loss(mu, true_mu)
+            loss_stat = bce_loss(stat_logit, true_stat)
+            
+            loss = loss_mu + loss_stat
             loss.backward()
             optimizer.step()
             
-            train_loss += loss.item()
+            train_loss += loss.item() * batch_x.size(0)
             
-        avg_train_loss = train_loss / len(train_loader)
+        train_loss /= len(train_loader.dataset)
         
-        # --- Validation Phase ---
+        # Validation
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for features, targets in val_loader:
-                features = features.to(device)
-                targets = targets.to(device)
+            for batch_x, batch_y in val_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                out = model(batch_x)
+                mu = out["mu"]
+                stat_logit = out["stationary_logit"]
                 
-                outputs = model(features)
-                loss = criterion(outputs, targets)
-                val_loss += loss.item()
+                true_mu = batch_y[:, 0]
+                true_stat = batch_y[:, 1]
                 
-        avg_val_loss = val_loss / len(val_loader)
-        
-        # Step the scheduler
-        scheduler.step(avg_val_loss)
-        
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
-        
-        # Early Stopping and Checkpointing
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_model_weights = copy.deepcopy(model.state_dict())
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
-                print("Early stopping triggered!")
-                break
+                loss_mu = mse_loss(mu, true_mu)
+                loss_stat = bce_loss(stat_logit, true_stat)
+                loss = loss_mu + loss_stat
                 
-    # Save the best model weights
-    model.load_state_dict(best_model_weights)
-    save_path = 'model_weights.pth'
-    torch.save(model.state_dict(), save_path)
-    print(f"Training complete. Best Val Loss: {best_val_loss:.6f}")
-    print(f"Model saved to {save_path}")
+                val_loss += loss.item() * batch_x.size(0)
+                
+        val_loss /= len(val_loader.dataset)
+        
+        print(f"Epoch {epoch+1:02d}/{epochs:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "model_weights.pth")
+            
+    print("Training complete! Best model saved to model_weights.pth")
 
-if __name__ == '__main__':
-    train_model()
+if __name__ == "__main__":
+    train()

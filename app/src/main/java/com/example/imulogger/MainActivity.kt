@@ -25,6 +25,11 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
+    private companion object {
+        const val MAP_ASSET = "eastern-zone.map"
+    }
+
+
     private lateinit var binding: ActivityMainBinding
     private lateinit var trackLine: Polyline
     private lateinit var drLine: Polyline
@@ -540,31 +545,74 @@ class MainActivity : AppCompatActivity() {
         else -> n.toString()
     }
 
+    /**
+     * Materialise the bundled Mapsforge map, which is 220 MB and therefore takes a while.
+     *
+     * Extraction goes to a temporary file and is renamed into place only once every byte is down.
+     * Writing straight to the destination means a kill mid-copy — or simply backing out of the
+     * activity, which cancels this coroutine — leaves a truncated file that `exists()` happily
+     * accepts forever, after which Mapsforge fails to parse it and the app silently falls back to
+     * blank raster tiles with nothing on screen to say why.
+     */
     private fun copyMapFromAssetsIfNeeded() {
         val baseDir = OfflineMaps.baseDir(this)
         if (!baseDir.exists()) baseDir.mkdirs()
-        val mapFile = java.io.File(baseDir, "eastern-zone.map")
-        if (!mapFile.exists()) {
-            lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    assets.open("eastern-zone.map").use { input ->
-                        java.io.FileOutputStream(mapFile).use { output ->
-                            input.copyTo(output)
-                        }
+        val mapFile = java.io.File(baseDir, MAP_ASSET)
+
+        val assetLength = try {
+            assets.openFd(MAP_ASSET).use { it.length }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Cannot size $MAP_ASSET", e)
+            -1L
+        }
+        // A file of exactly the right length is the one case we can skip.
+        if (mapFile.exists() && assetLength > 0 && mapFile.length() == assetLength) return
+        if (mapFile.exists()) {
+            android.util.Log.w(
+                "MainActivity",
+                "Removing ${mapFile.name}: ${mapFile.length()} bytes, expected $assetLength",
+            )
+            mapFile.delete()
+        }
+
+        // Deliberately not lifecycleScope: a 220 MB copy must not be cancelled halfway because
+        // the user rotated the screen or stepped into another app.
+        val appContext = applicationContext
+        Thread({
+            val tmp = java.io.File(baseDir, "$MAP_ASSET.tmp")
+            try {
+                appContext.assets.open(MAP_ASSET).use { input ->
+                    java.io.FileOutputStream(tmp).use { output ->
+                        input.copyTo(output, 1 shl 16)
+                        output.flush()
+                        output.fd.sync()
                     }
-                    launch(kotlinx.coroutines.Dispatchers.Main) {
-                        Toast.makeText(this@MainActivity, "Offline map extracted successfully.", Toast.LENGTH_SHORT).show()
-                        if (::binding.isInitialized) {
-                            val bounds = OfflineMaps.apply(binding.map, offline)
-                            bounds?.let { binding.map.post { binding.map.zoomToBoundingBox(it, false) } }
-                            binding.map.invalidate()
-                            renderTileState()
-                        }
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("MainActivity", "Failed to extract map from assets", e)
+                }
+                if (assetLength > 0 && tmp.length() != assetLength) {
+                    throw java.io.IOException("copied ${tmp.length()} of $assetLength bytes")
+                }
+                if (!tmp.renameTo(mapFile)) throw java.io.IOException("rename failed")
+
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || !::binding.isInitialized) return@runOnUiThread
+                    Toast.makeText(this, "Offline map ready.", Toast.LENGTH_SHORT).show()
+                    val bounds = OfflineMaps.apply(binding.map, offline)
+                    bounds?.let { binding.map.post { binding.map.zoomToBoundingBox(it, false) } }
+                    binding.map.invalidate()
+                    renderTileState()
+                }
+            } catch (e: Exception) {
+                tmp.delete()
+                android.util.Log.e("MainActivity", "Failed to extract map from assets", e)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    Toast.makeText(
+                        this,
+                        "Could not extract the offline map: ${e.message}",
+                        Toast.LENGTH_LONG,
+                    ).show()
                 }
             }
-        }
+        }, "map-extract").start()
     }
 }
