@@ -64,6 +64,12 @@ class MapMatcher(private val roads: RoadNetwork) {
          */
         const val HEADING_FEEDBACK_MIN_CONFIDENCE = 0.6
 
+        /**
+         * How far a candidate's bearing must differ from the winner's before it counts as a
+         * genuine alternative direction rather than another piece of the same road.
+         */
+        private const val RIVAL_BEARING_DEG = 30.0
+
         /** Share of the heading disagreement absorbed per accepted match. */
         const val HEADING_FEEDBACK_GAIN = 0.35
 
@@ -178,10 +184,23 @@ class MapMatcher(private val roads: RoadNetwork) {
         lastLon = lon
 
         val head = beam.first()
-        // Confidence as the softmax share of the winner: near 1 when one road clearly explains the
-        // fix, near 0.5 at a fork where two are equally good.
-        val partition = beam.sumOf { exp(it.logProb) }
-        val confidence = if (partition > 0) exp(head.logProb) / partition else 0.0
+
+        // Confidence is specifically confidence in the *heading*, because that is the only thing
+        // it gates. A softmax share over the whole beam measures the wrong quantity: most of the
+        // beam is consecutive segments of the same road, so the winner's share stays near 1/beam
+        // (measured median 0.19) even when every candidate agrees on direction. What matters is
+        // whether a candidate pointing a genuinely different way is competitive — a cross street
+        // at a junction — so confidence is the two-way contest against the best such rival.
+        val rival = beam.firstOrNull {
+            undirectedBearingDelta(it.segment.bearingDeg, head.segment.bearingDeg) > RIVAL_BEARING_DEG
+        }
+        val confidence = if (rival == null) {
+            1.0
+        } else {
+            val h = exp(head.logProb)
+            val r = exp(rival.logProb)
+            if (h + r > 0) h / (h + r) else 0.0
+        }
         val correction = metres(lat, lon, head.lat, head.lon)
 
         // Never move the estimate further than we believe it is wrong by.
