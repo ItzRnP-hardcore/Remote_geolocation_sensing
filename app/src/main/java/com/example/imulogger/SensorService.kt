@@ -209,6 +209,9 @@ class SensorService : Service() {
     private var lastSpeed: Float? = null
     private var lastBearing: Float? = null
     private var lastAccuracy: Float? = null
+    private var distanceMetres: Double = 0.0
+    private var lastDistanceLat: Double = Double.NaN
+    private var lastDistanceLon: Double = Double.NaN
     private var satellitesVisible: Int = 0
     private var satellitesUsedInFix: Int = 0
     private var meanCn0: Float = 0f
@@ -414,6 +417,9 @@ class SensorService : Service() {
         imuSamples = 0
         gpsFixes = 0
         writeErrors = 0
+        distanceMetres = 0.0
+        lastDistanceLat = Double.NaN
+        lastDistanceLon = Double.NaN
         trackPoints.clear()
         drPoints.clear()
         deadReckoner.reset()
@@ -502,8 +508,15 @@ class SensorService : Service() {
                 _track.value = ArrayList(trackPoints)
             }
             deadReckoner.position?.let { p ->
-                if (drPoints.lastOrNull() != p) {
-                    drPoints.add(p)
+                if (drPoints.lastOrNull()?.let { it.lat != p.lat || it.lon != p.lon } != false) {
+                    // Mark the stretch where the integrator is running without GNSS help, which
+                    // is exactly the stretch whose divergence the demo is about.
+                    val unaided = freeRunRequested ||
+                        lastFixRealtimeNs == 0L ||
+                        (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNs) > 5_000_000_000L
+                    drPoints.add(
+                        p.copy(quality = if (unaided) GnssQuality.LOST else GnssQuality.GOOD)
+                    )
                     _drTrack.value = ArrayList(drPoints)
                 }
             }
@@ -536,6 +549,8 @@ class SensorService : Service() {
             freeRun = freeRunRequested,
             stationary = deadReckoner.isStationary,
             deviceAzimuth = latestAzimuthDeg,
+            distanceMetres = distanceMetres,
+            drSpeedMps = deadReckoner.speed,
             mlMu = mlMu,
             mlStationaryProbability =
                 if (mlStationaryLogit.isNaN()) Float.NaN
@@ -732,11 +747,31 @@ class SensorService : Service() {
         lastBearing = if (location.hasBearing()) location.bearing else null
         lastAccuracy = if (location.hasAccuracy()) location.accuracy else null
 
-        trackPoints.add(TrackPoint(location.latitude, location.longitude))
+        // Accumulate ground truth distance. Gated on speed because GNSS jitter while parked
+        // otherwise inflates the denominator by metres a minute and flatters the drift ratio.
+        val movingFastEnough = location.hasSpeed() && location.speed > 0.5f
+        if (movingFastEnough && !lastDistanceLat.isNaN()) {
+            val results = FloatArray(1)
+            Location.distanceBetween(
+                lastDistanceLat, lastDistanceLon, location.latitude, location.longitude, results,
+            )
+            distanceMetres += results[0]
+        }
+        if (movingFastEnough || lastDistanceLat.isNaN()) {
+            lastDistanceLat = location.latitude
+            lastDistanceLon = location.longitude
+        }
+
+        // Quality is captured per fix so the map can shade the stretch where GNSS was failing.
+        val quality = when {
+            satellitesUsedInFix < 4 || meanCn0 < 20f -> GnssQuality.WEAK
+            else -> GnssQuality.GOOD
+        }
+        trackPoints.add(TrackPoint(location.latitude, location.longitude, quality))
         trackDirty = true
 
         // Only healthy fixes are allowed to correct the integrator. Anchoring to a degraded fix
-        // would hide exactly the error this app exists to measure � and in free-run mode nothing
+        // would hide exactly the error this app exists to measure — and in free-run mode nothing
         // corrects it at all.
         val healthy = satellitesUsedInFix >= 4 &&
             (!location.hasAccuracy() || location.accuracy < 20f)
@@ -753,7 +788,7 @@ class SensorService : Service() {
         }
     }
 
-    /** Append a dead-reckoning row at 10 Hz � enough to plot, far below the 200 Hz update rate. */
+    /** Append a dead-reckoning row at 10 Hz — enough to plot, far below the 200 Hz update rate. */
     private fun recordDeadReckoning(tNs: Long) {
         if (tNs - lastDrSampleNs < 100_000_000L) return
         lastDrSampleNs = tNs

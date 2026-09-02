@@ -27,6 +27,9 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val MAP_ASSET = "eastern-zone.map"
+
+        /** How much ground the locate button frames around the current position. */
+        const val CENTRE_RADIUS_KM = 1.0
     }
 
 
@@ -37,6 +40,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var drMarker: Marker
     private lateinit var locationOverlay: MyLocationNewOverlay
 
+    /** Overlays repainting the degraded stretches of each track; rebuilt whenever it grows. */
+    private val gpsQualityLines = mutableListOf<Polyline>()
+    private val drQualityLines = mutableListOf<Polyline>()
+
+    private var panelExpanded = false
     private var offline = true
     private var followPosition = true
     private var trackSize = 0
@@ -84,34 +92,35 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        binding.chipOffline.setOnClickListener {
-            offline = !offline
-            OfflineMaps.apply(binding.map, offline)
-            binding.map.invalidate()
-            renderTileState()
-        }
+        binding.btnSettings.setOnClickListener { showSettings() }
 
-        binding.chipPreload.setOnClickListener { askPrefetchRadius() }
+        binding.btnTheme.setOnClickListener {
+            MapsforgeSource.setNight(this, !MapsforgeSource.isNight(this))
+            reattachMap()
+            Toast.makeText(
+                this,
+                if (MapsforgeSource.isNight(this)) "Night map" else "Day map",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
 
         binding.btnFreeRun.setOnClickListener {
             SensorService.setFreeRun(!SensorService.status.value.freeRun)
         }
 
-        binding.fabCentre.setOnClickListener {
-            followPosition = true
-            if (::locationOverlay.isInitialized) {
-                locationOverlay.enableFollowLocation()
-                val myLoc = locationOverlay.myLocation
-                if (myLoc != null) {
-                    binding.map.controller.animateTo(myLoc)
-                    return@setOnClickListener
-                }
-            }
-            SensorService.status.value.let { s ->
-                if (s.lastLat != null && s.lastLon != null) {
-                    binding.map.controller.animateTo(GeoPoint(s.lastLat, s.lastLon))
-                }
-            }
+        binding.fabCentre.setOnClickListener { centreOnMe() }
+
+        binding.fabPanel.setOnClickListener { setPanelExpanded(!panelExpanded) }
+        setPanelExpanded(false)
+
+        // Insets rather than a hardcoded 48dp: the status bar is a different height on other
+        // devices and in landscape, and the chips end up either clipped or floating.
+        val chipGap = (16 * resources.displayMetrics.density).toInt()
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.topBar) { view, insets ->
+            val statusBar =
+                insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars()).top
+            view.setPadding(view.paddingLeft, statusBar + chipGap, view.paddingRight, chipGap)
+            insets
         }
 
         // The UI follows the service, not the last tap: if recording stops on its own, the
@@ -140,6 +149,9 @@ class MainActivity : AppCompatActivity() {
     private fun setUpMap() = with(binding.map) {
         val vectorBounds = OfflineMaps.apply(this, offline)
         setMultiTouchControls(true)
+        zoomController.setVisibility(
+            org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER
+        )
         isVerticalMapRepetitionEnabled = false
         isHorizontalMapRepetitionEnabled = false
         // Remove isTilesScaledToDpi as it scales bitmaps, causing blurriness and making text too large/wrapped
@@ -258,10 +270,80 @@ class MainActivity : AppCompatActivity() {
         renderTileState()
     }
 
+    /**
+     * Show or hide the session panel.
+     *
+     * The panel is diagnostics; the map is the app. Collapsed to a button by default so the map
+     * gets the screen, and the button carries the record state so nothing important is hidden by
+     * being collapsed.
+     */
+    private fun setPanelExpanded(expanded: Boolean) {
+        panelExpanded = expanded
+        androidx.transition.TransitionManager.beginDelayedTransition(
+            binding.root as android.view.ViewGroup,
+            androidx.transition.AutoTransition().apply { duration = 180 },
+        )
+        binding.panelCard.visibility = if (expanded) android.view.View.VISIBLE else android.view.View.GONE
+        binding.fabPanel.setImageResource(if (expanded) R.drawable.ic_close else R.drawable.ic_panel)
+        binding.fabPanel.contentDescription =
+            getString(if (expanded) R.string.hide_panel else R.string.show_panel)
+    }
+
+    /**
+     * Bring the current position into view, tightening to [CENTRE_RADIUS_KM] only when the map is
+     * currently showing more than that.
+     *
+     * Zooming unconditionally would pull the user back out every time they had deliberately zoomed
+     * in past a kilometre, so a closer view is treated as intentional and only panned.
+     */
+    private fun centreOnMe() {
+        followPosition = true
+        if (::locationOverlay.isInitialized) locationOverlay.enableFollowLocation()
+
+        val here = (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
+            ?: SensorService.status.value.let { s ->
+                if (s.lastLat != null && s.lastLon != null) GeoPoint(s.lastLat, s.lastLon) else null
+            }
+
+        if (here == null) {
+            Toast.makeText(this, "No position yet — waiting for a GPS fix.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val visible = visibleRadiusKm()
+        if (visible == null || visible > CENTRE_RADIUS_KM) {
+            // Asking for a box rather than a zoom level keeps the visible span honest across
+            // screen sizes: the same numeric zoom covers very different ground on a tall phone.
+            val box = TilePrefetcher.boundingBox(here, CENTRE_RADIUS_KM)
+            // post() because zoomToBoundingBox needs the view measured; on the first tap after
+            // launch it is not, and the zoom silently lands on the wrong level.
+            binding.map.post { binding.map.zoomToBoundingBox(box, true) }
+        } else {
+            binding.map.controller.animateTo(here)
+        }
+    }
+
+    /**
+     * Half the shorter visible span, in kilometres — the same "radius" convention
+     * [TilePrefetcher.boundingBox] uses, so the two are directly comparable. Null before the map
+     * has been laid out and its bounding box is meaningless.
+     */
+    private fun visibleRadiusKm(): Double? {
+        if (binding.map.width == 0 || binding.map.height == 0) return null
+        val box = binding.map.boundingBox ?: return null
+        val latSpanKm = box.latitudeSpan * 111.132
+        val lonSpanKm =
+            box.longitudeSpanWithDateLine * 111.320 *
+                kotlin.math.cos(Math.toRadians(box.centerLatitude)).coerceAtLeast(0.01)
+        if (latSpanKm <= 0 || lonSpanKm <= 0) return null
+        return minOf(latSpanKm, lonSpanKm) / 2.0
+    }
+
     private fun drawTrack(points: List<TrackPoint>) {
         if (points.size == trackSize) return
         trackSize = points.size
         trackLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        rebuildQualitySegments(points, trackLine, gpsQualityLines, 11f)
         points.lastOrNull()?.let {
             val here = GeoPoint(it.lat, it.lon)
             marker.position = here
@@ -274,8 +356,59 @@ class MainActivity : AppCompatActivity() {
         if (points.size == drSize) return
         drSize = points.size
         drLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        rebuildQualitySegments(points, drLine, drQualityLines, 10f)
         points.lastOrNull()?.let { drMarker.position = GeoPoint(it.lat, it.lon) }
         binding.map.invalidate()
+    }
+
+    /**
+     * Repaint the stretches where GNSS was degraded or withheld, on top of the base track.
+     *
+     * The two tracks diverging is the whole story, and a viewer cannot see *why* unless the
+     * cause is drawn too. Rather than a multi-coloured polyline (osmdroid has no such thing),
+     * contiguous runs of non-GOOD points become their own overlays laid over the base line,
+     * starting one point early so they visually join the healthy track either side.
+     */
+    private fun rebuildQualitySegments(
+        points: List<TrackPoint>,
+        baseLine: Polyline,
+        store: MutableList<Polyline>,
+        widthPx: Float,
+    ) {
+        val overlays = binding.map.overlays
+        store.forEach { overlays.remove(it) }
+        store.clear()
+
+        var i = 0
+        while (i < points.size) {
+            val quality = points[i].quality
+            if (quality == GnssQuality.GOOD || quality == GnssQuality.IDLE) {
+                i++
+                continue
+            }
+            var j = i
+            while (j < points.size && points[j].quality == quality) j++
+            val from = (i - 1).coerceAtLeast(0)
+            val to = (j - 1).coerceAtMost(points.size - 1)
+            if (to > from) {
+                store.add(
+                    Polyline(binding.map).apply {
+                        setPoints(points.subList(from, to + 1).map { GeoPoint(it.lat, it.lon) })
+                        outlinePaint.color = ContextCompat.getColor(
+                            this@MainActivity,
+                            if (quality == GnssQuality.LOST) R.color.quality_lost
+                            else R.color.quality_weak,
+                        )
+                        outlinePaint.strokeWidth = widthPx
+                    }
+                )
+            }
+            i = j
+        }
+
+        // Insert directly above the base line so markers and the other track stay on top.
+        val at = (overlays.indexOf(baseLine) + 1).coerceIn(0, overlays.size)
+        store.forEachIndexed { index, line -> overlays.add(at + index, line) }
     }
 
     private fun askPrefetchRadius() {
@@ -374,8 +507,6 @@ class MainActivity : AppCompatActivity() {
                     prefetching = false
                     p.message?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
                     renderTileState()
-                } else {
-                    binding.chipPreload.text = "${p.done}/${p.total}"
                 }
             }
         }
@@ -397,8 +528,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderTileState() {
-        if (!prefetching) binding.chipPreload.text = getString(R.string.preload)
-        binding.chipOffline.text = getString(if (offline) R.string.offline else R.string.online)
         val archives = OfflineMaps.archives(this)
         val vector = MapsforgeSource.mapFiles(this)
         // Only a hard-offline map with nothing on disk is actually blank; online mode can fetch.
@@ -406,11 +535,164 @@ class MainActivity : AppCompatActivity() {
         binding.tvNoTiles.visibility = if (blank) android.view.View.VISIBLE else android.view.View.GONE
         if (blank) {
             binding.tvNoTiles.text =
-                "No offline map found.\n\nDrop an .mbtiles archive into\n" +
-                    OfflineMaps.baseDir(this).absolutePath +
-                    "\n\nor tap Offline to switch to Online and pan over your area once to " +
-                    "cache it."
+                "No offline map on this device.\n\nOpen Settings to download a region, " +
+                    "or drop a .map / .mbtiles file into\n" + OfflineMaps.baseDir(this).absolutePath
         }
+    }
+
+    /** Rebuild the tile provider after the theme or the set of installed maps changed. */
+    private fun reattachMap() {
+        val bounds = OfflineMaps.apply(binding.map, offline)
+        binding.map.invalidate()
+        renderTileState()
+        // Only reframe when there is nowhere better to look; otherwise keep the user's view.
+        if (SensorService.status.value.lastLat == null && trackSize == 0) {
+            bounds?.let { binding.map.post { binding.map.zoomToBoundingBox(it, false) } }
+        }
+    }
+
+    // ------------------------------------------------------------------ settings
+
+    private fun showSettings() {
+        val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.dialog_settings, null)
+        sheet.setContentView(view)
+
+        val swOffline = view.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.swOffline)
+        swOffline.isChecked = offline
+        swOffline.setOnCheckedChangeListener { _, checked ->
+            offline = checked
+            reattachMap()
+        }
+
+        view.findViewById<android.widget.Button>(R.id.btnTileSource).setOnClickListener {
+            sheet.dismiss()
+            promptForTileSource()
+        }
+        view.findViewById<android.widget.Button>(R.id.btnPreload).setOnClickListener {
+            sheet.dismiss()
+            askPrefetchRadius()
+        }
+
+        val list = view.findViewById<android.widget.LinearLayout>(R.id.zoneList)
+        val storage = view.findViewById<android.widget.TextView>(R.id.tvStorage)
+
+        // DownloadManager exposes no progress callback, so the sheet polls — but only while a
+        // transfer is actually in flight. Ticking unconditionally would keep the window from ever
+        // going idle, which burns battery and blocks UI automation from ever settling.
+        val ticker = object : Runnable {
+            override fun run() {
+                MapDownloader.promoteCompleted(this@MainActivity)
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { reattachMap() }
+                bindZoneRows(list, storage) { rescheduleTicker(list, this) }
+                rescheduleTicker(list, this)
+            }
+        }
+        bindZoneRows(list, storage) { list.post(ticker) }
+        rescheduleTicker(list, ticker)
+        sheet.setOnDismissListener { list.removeCallbacks(ticker) }
+        sheet.show()
+    }
+
+    private fun bindZoneRows(
+        list: android.widget.LinearLayout,
+        storage: android.widget.TextView,
+        refresh: () -> Unit,
+    ) {
+        list.removeAllViews()
+        var installedBytes = 0L
+
+        for (zone in MapDownloader.INDIA_ZONES) {
+            val row = layoutInflater.inflate(R.layout.item_map_zone, list, false)
+            val name = row.findViewById<android.widget.TextView>(R.id.zoneName)
+            val status = row.findViewById<android.widget.TextView>(R.id.zoneStatus)
+            val action = row.findViewById<com.google.android.material.button.MaterialButton>(R.id.zoneAction)
+
+            name.text = zone.label
+            val installed = MapDownloader.isInstalled(this, zone)
+            val progress = MapDownloader.progress(this, zone)
+
+            when {
+                progress != null && progress.running -> {
+                    status.text = String.format(
+                        Locale.US, "%d%%  %d / %d MB",
+                        progress.percent,
+                        progress.bytesDone / 1_048_576,
+                        progress.bytesTotal / 1_048_576,
+                    )
+                    action.text = getString(R.string.cancel)
+                    action.setOnClickListener {
+                        MapDownloader.cancel(this, zone)
+                        refreshRows(list, storage)
+                    }
+                }
+                installed -> {
+                    installedBytes += MapDownloader.installedFile(this, zone).length()
+                    status.text = getString(R.string.installed)
+                    status.setTextColor(ContextCompat.getColor(this, R.color.quality_good))
+                    action.text = getString(R.string.delete)
+                    action.setOnClickListener { confirmDelete(zone) { refreshRows(list, storage) } }
+                }
+                else -> {
+                    status.text = String.format(Locale.US, "about %d MB", zone.approxMb)
+                    action.text = getString(R.string.download)
+                    action.setOnClickListener { confirmDownload(zone) { refreshRows(list, storage) } }
+                }
+            }
+            list.addView(row)
+        }
+
+        storage.text = String.format(
+            Locale.US, "%d MB installed on this device", installedBytes / 1_048_576,
+        )
+    }
+
+    /** Keep polling only while at least one download is live. */
+    private fun rescheduleTicker(list: android.widget.LinearLayout, ticker: Runnable) {
+        list.removeCallbacks(ticker)
+        val active = MapDownloader.INDIA_ZONES.any {
+            MapDownloader.progress(this, it)?.running == true
+        }
+        if (active) list.postDelayed(ticker, 1_000)
+    }
+
+    private fun refreshRows(list: android.widget.LinearLayout, storage: android.widget.TextView) {
+        bindZoneRows(list, storage) {}
+    }
+
+    /**
+     * Network choice is put to the user rather than defaulted, because these files run to half a
+     * gigabyte and that is their data allowance to spend.
+     */
+    private fun confirmDownload(zone: MapDownloader.Zone, onChanged: () -> Unit) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(zone.label)
+            .setMessage(
+                "About ${zone.approxMb} MB from download.mapsforge.org (OpenStreetMap data). " +
+                    "The download resumes if interrupted and continues while the app is closed."
+            )
+            .setPositiveButton("Wi-Fi only") { _, _ ->
+                MapDownloader.enqueue(this, zone, wifiOnly = true); onChanged()
+            }
+            .setNeutralButton("Any network") { _, _ ->
+                MapDownloader.enqueue(this, zone, wifiOnly = false); onChanged()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmDelete(zone: MapDownloader.Zone, onChanged: () -> Unit) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Delete ${zone.label}?")
+            .setMessage("Frees about ${zone.approxMb} MB. You can download it again later.")
+            .setPositiveButton(R.string.delete) { _, _ ->
+                MapDownloader.delete(this, zone)
+                reattachMap()
+                onChanged()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun mapSourceLabel(): String {
@@ -452,6 +734,19 @@ class MainActivity : AppCompatActivity() {
             else -> getString(R.string.idle)
         }
 
+        binding.fabPanel.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            ContextCompat.getColor(
+                this,
+                when {
+                    status.error != null -> R.color.action_armed
+                    status.freeRun && status.running -> R.color.action_armed
+                    status.running -> R.color.action_record
+                    else -> R.color.overlay_chip
+                },
+            )
+        )
+        if (status.error != null && !panelExpanded) setPanelExpanded(true)
+
         binding.btnRecord.text = when {
             status.running -> getString(R.string.stop)
             hasFineLocation() -> getString(R.string.start)
@@ -483,22 +778,78 @@ class MainActivity : AppCompatActivity() {
 
         binding.legendGps.setTextColor(ContextCompat.getColor(this, R.color.track))
         binding.legendImu.setTextColor(ContextCompat.getColor(this, R.color.track_imu))
+        // Folding live speed into the legend gives the most legible real-time proof that
+        // something is working, without another row of chrome.
+        binding.legendGps.text =
+            if (status.running && status.lastSpeedMps != null) {
+                String.format(Locale.US, "GPS %s %.0f km/h", "·", status.lastSpeedMps * 3.6f)
+            } else {
+                getString(R.string.legend_gps)
+            }
+        binding.legendImu.text =
+            if (status.running && status.drLat != null) {
+                String.format(Locale.US, "IMU %s %.0f km/h", "·", status.drSpeedMps * 3.6)
+            } else {
+                getString(R.string.legend_imu)
+            }
 
         binding.btnFreeRun.setText(if (status.freeRun) R.string.free_run_on else R.string.free_run)
+        binding.btnFreeRun.setStrokeColorResource(
+            if (status.freeRun) R.color.action_armed else R.color.overlay_stroke_strong
+        )
+        binding.btnFreeRun.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (status.freeRun) R.color.action_armed else R.color.on_overlay_primary,
+            )
+        )
 
         // Drift is only meaningful once the integrator has a GNSS anchor to have drifted from.
         binding.mDrift.text = when {
             !status.running || status.drLat == null -> "—"
             else -> String.format(Locale.US, "%.0f m", status.driftMetres)
         }
+        // Colour against the plan's benchmark once there is enough distance for the ratio to
+        // mean anything, and fall back to absolute thresholds before that.
+        val pct = status.driftPercent
         binding.mDrift.setTextColor(
             ContextCompat.getColor(
                 this,
                 when {
                     !status.running || status.drLat == null -> R.color.quality_idle
+                    pct != null && pct > DRIFT_BENCHMARK_PERCENT -> R.color.quality_lost
+                    pct != null && pct > DRIFT_BENCHMARK_PERCENT / 2 -> R.color.quality_weak
+                    pct != null -> R.color.quality_good
                     status.driftMetres > 100 -> R.color.quality_lost
                     status.driftMetres > 25 -> R.color.quality_weak
                     else -> R.color.quality_good
+                },
+            )
+        )
+
+        binding.mDriftPercent.text = when {
+            !status.running || status.drLat == null -> ""
+            pct == null -> String.format(
+                Locale.US, "of %s travelled", formatDistance(status.distanceMetres),
+            )
+            else -> String.format(
+                Locale.US,
+                "%.1f%% of %s  %s",
+                pct,
+                formatDistance(status.distanceMetres),
+                if (pct <= DRIFT_BENCHMARK_PERCENT) "✓ under 10%" else "✗ over 10%",
+            )
+        }
+        binding.mDriftPercent.visibility =
+            if (binding.mDriftPercent.text.isNullOrEmpty()) android.view.View.GONE
+            else android.view.View.VISIBLE
+        binding.mDriftPercent.setTextColor(
+            ContextCompat.getColor(
+                this,
+                when {
+                    pct == null -> R.color.on_overlay_secondary
+                    pct <= DRIFT_BENCHMARK_PERCENT -> R.color.quality_good
+                    else -> R.color.quality_lost
                 },
             )
         )
@@ -512,11 +863,11 @@ class MainActivity : AppCompatActivity() {
             binding.mSats.text = "${status.satellitesUsedInFix}/${status.satellitesVisible}"
             binding.tvDetail.text = String.format(
                 Locale.US,
-                "%d Hz Â· C/N0 %.0f dB-Hz Â· %s Â· %s",
+                "%d Hz · C/N0 %.0f dB-Hz · %s · %s",
                 rate,
                 status.meanCn0DbHz,
                 if (status.secondsSinceFix < 0) "no fix yet" else "fix ${status.secondsSinceFix}s ago",
-                status.lastAccuracyM?.let { String.format(Locale.US, "Â±%.0f m", it) } ?: "Â±— m",
+                status.lastAccuracyM?.let { String.format(Locale.US, "±%.0f m", it) } ?: "±— m",
             )
         } else {
             binding.mElapsed.text = "—"
@@ -534,6 +885,10 @@ class MainActivity : AppCompatActivity() {
             drMarker.rotation = -azimuth
         }
     }
+
+    private fun formatDistance(metres: Double): String =
+        if (metres >= 1000) String.format(Locale.US, "%.2f km", metres / 1000.0)
+        else String.format(Locale.US, "%.0f m", metres)
 
     private fun formatDuration(seconds: Long): String =
         if (seconds < 3600) String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60)

@@ -23,4 +23,18 @@
     <string name="legend_gps">GPS</string>
     <string name="legend_imu">IMU only</string>
     <string name="drift">drift</string>
+    <string name="settings">Settings</string>
+    <string name="map_theme">Map theme</string>
+    <string name="offline_mode">Offline mode</string>
+    <string name="offline_mode_hint">Never touch the network for tiles. Vector maps are unaffected — they always render offline.</string>
+    <string name="offline_maps">Offline maps</string>
+    <string name="raster_tiles">Raster tiles</string>
+    <string name="tile_source">Set tile URL template…</string>
+    <string name="preload_tiles">Preload tiles around me…</string>
+    <string name="download">Download</string>
+    <string name="installed">Installed</string>
+    <string name="cancel">Cancel</string>
+    <string name="delete">Delete</string>
+    <string name="show_panel">Show session panel</string>
+    <string name="hide_panel">Hide session panel</string>
 </resources>

@@ -28,6 +28,24 @@ object MapsforgeSource {
 
     private var graphicsInitialised = false
 
+    private const val PREFS = "map_theme"
+    private const val KEY_NIGHT = "night"
+
+    /**
+     * Day or night styling for the rendered map.
+     *
+     * Night is the bundled custom theme (dark, with the city labels shrunk); day is Mapsforge's
+     * built-in DEFAULT. This is the render theme, not the app theme — the overlay UI stays dark in
+     * both, because a light card floating over a light basemap loses all separation.
+     */
+    fun isNight(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_NIGHT, true)
+
+    fun setNight(context: Context, night: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_NIGHT, night).apply()
+    }
+
     fun mapFiles(context: Context): List<File> =
         OfflineMaps.baseDir(context)
             .listFiles { f -> f.isFile && f.extension.equals("map", ignoreCase = true) }
@@ -48,14 +66,24 @@ object MapsforgeSource {
                 MapsForgeTileSource.createInstance(context.applicationContext as Application)
                 graphicsInitialised = true
             }
-            var source: MapsForgeTileSource? = null
-            try {
-                // Use the custom theme that has the city text size reduced
-                val theme = org.mapsforge.map.android.rendertheme.AssetsRenderTheme(context.applicationContext.assets, "", "custom_theme.xml")
-                source = MapsForgeTileSource.createFromFiles(files.toTypedArray(), theme, "custom_theme")
+            val night = isNight(context)
+            val source: MapsForgeTileSource = try {
+                if (night) {
+                    // The bundled theme: dark, with city labels shrunk so they stop dominating.
+                    val theme = org.mapsforge.map.android.rendertheme.AssetsRenderTheme(
+                        context.applicationContext.assets, "", "custom_theme.xml",
+                    )
+                    MapsForgeTileSource.createFromFiles(files.toTypedArray(), theme, "custom_theme")
+                } else {
+                    MapsForgeTileSource.createFromFiles(
+                        files.toTypedArray(),
+                        org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT,
+                        "default",
+                    )
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load custom render theme, falling back to default", e)
-                source = MapsForgeTileSource.createFromFiles(files.toTypedArray())
+                Log.e(TAG, "Failed to load render theme, falling back to built-in default", e)
+                MapsForgeTileSource.createFromFiles(files.toTypedArray())
             }
             
             map.tileProvider = MapsForgeTileProvider(SimpleRegisterReceiver(context), source, null)

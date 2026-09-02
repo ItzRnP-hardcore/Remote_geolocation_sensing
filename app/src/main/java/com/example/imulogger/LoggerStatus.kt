@@ -59,11 +59,26 @@ data class LoggerStatus(
     val mlStationaryProbability: Float = Float.NaN,
     val mlInferences: Long = 0,
     val mlDropped: Long = 0,
+
+    /** Ground distance covered so far, from GNSS. The denominator of the benchmark. */
+    val distanceMetres: Double = 0.0,
+
+    /** Speed the integrator believes it is doing, for comparison against [lastSpeedMps]. */
+    val drSpeedMps: Double = 0.0,
 ) {
     /**
      * How much the fusion stage should trust GNSS right now. Derived here rather than in the UI so
      * the filter and the display can never disagree about what the constellation is doing.
      */
+    /**
+     * Drift as a fraction of distance travelled — the number the execution plan actually sets a
+     * target for (< 10%). A bare metre count cannot be judged without knowing how far we went.
+     * Null until enough ground has been covered for the ratio to mean anything.
+     */
+    val driftPercent: Double?
+        get() = if (distanceMetres < MIN_DISTANCE_FOR_PERCENT) null
+        else 100.0 * driftMetres / distanceMetres
+
     val gnssQuality: GnssQuality
         get() = when {
             !running -> GnssQuality.IDLE
@@ -73,7 +88,22 @@ data class LoggerStatus(
         }
 }
 
+/** Below this the drift ratio is dominated by GNSS noise rather than by real error. */
+const val MIN_DISTANCE_FOR_PERCENT = 50.0
+
+/** The execution plan's target: drift strictly under this share of distance travelled. */
+const val DRIFT_BENCHMARK_PERCENT = 10.0
+
 enum class GnssQuality { IDLE, GOOD, WEAK, LOST }
 
-/** One recorded fix, kept in memory for the map track. */
-data class TrackPoint(val lat: Double, val lon: Double)
+/**
+ * One recorded fix, kept in memory for the map track.
+ *
+ * [quality] travels with the point so the map can colour the stretch where the constellation was
+ * failing. Without it the divergence between the two tracks has no visible cause.
+ */
+data class TrackPoint(
+    val lat: Double,
+    val lon: Double,
+    val quality: GnssQuality = GnssQuality.GOOD,
+)

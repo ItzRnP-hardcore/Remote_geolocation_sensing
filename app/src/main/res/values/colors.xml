@@ -9,4 +9,19 @@
     <color name="quality_idle">#5F5E5A</color>
     <color name="track">#1668C6</color>
     <color name="track_imu">#EB6834</color>
+
+    <!-- Map-overlay surface. This UI floats above a map and stays dark in both themes: a light
+         card over a light basemap loses all separation. These are deliberately not theme-swapped. -->
+    <color name="overlay_scrim">#99000000</color>
+    <color name="overlay_card">#1C1C1E</color>
+    <color name="overlay_chip">#2E2E38</color>
+    <color name="overlay_stroke">#33FFFFFF</color>
+    <color name="overlay_stroke_strong">#404045</color>
+
+    <color name="on_overlay_primary">#FFFFFF</color>
+    <color name="on_overlay_secondary">#A0A0A5</color>
+    <color name="on_overlay_muted">#808085</color>
+
+    <color name="action_record">#0A84FF</color>
+    <color name="action_armed">#D03B3B</color>
 </resources>
