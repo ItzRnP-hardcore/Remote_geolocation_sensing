@@ -125,11 +125,15 @@ class DeadReckoner {
     /**
      * Rotate the course toward a road bearing, keeping speed untouched.
      *
-     * This is the whole point of map matching for this project. Integrated speed is competitive —
-     * measured at 3.10 m/s against GPS's 3.36 on a recorded run — while heading is where the
-     * error lives, and a road's bearing is an observation of exactly the quantity the IMU cannot
-     * recover for itself. Speed is deliberately left alone: correcting a channel that is already
-     * good would only inject the map's error into it.
+     * This is the whole point of map matching for this project: a road's bearing is an observation
+     * of exactly the quantity the IMU cannot recover for itself.
+     *
+     * Speed is left alone here because the map has nothing to say about it, NOT because it is
+     * good. Session-average speed looks competitive (3.10 m/s against GPS's 3.36 on a recorded
+     * run), but that average is flattered by the anchored stretches. Measured over free-running
+     * outages alone, this integrator accumulates about 37% less distance than was actually
+     * travelled - 74 m short over 60 s - which is now the single largest error source in the
+     * system and the reason [AlongRoadTracker] is disabled by default.
      *
      * The road direction is ambiguous on a two-way road, so the nearer of the two is taken;
      * [gain] scales how much of the disagreement is absorbed per update. Returns the degrees

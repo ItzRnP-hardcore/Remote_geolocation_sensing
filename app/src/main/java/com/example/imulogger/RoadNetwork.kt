@@ -20,8 +20,9 @@ import kotlin.math.tan
  * network needs no extra download, no `.osm.pbf`, and no separate routing graph — a probe of one
  * z15 tile over IIT Kharagpur returned 106 ways and 660 vertices.
  *
- * What the format does *not* give is topology: ways are clipped at tile boundaries and carry no
- * node identity, so there is no connectivity to route over. [MapMatcher] is built to not need it.
+ * What the format does *not* give directly is topology: ways are clipped at tile boundaries and
+ * carry no node identity, so there is no connectivity to route over. [MapMatcher] is built to not
+ * need it; [graphNear] recovers it anyway, by snapping coincident endpoints together.
  *
  * Not thread-safe. Confined to the matcher thread in [SensorService].
  */
@@ -72,6 +73,8 @@ class RoadNetwork(private val mapFile: File) {
 
     private var store: MapFile? = null
     private val tiles = HashMap<Long, List<Segment>>()
+    private var cachedGraph: RoadGraph? = null
+    private var cachedGraphKey = 0L
 
     fun open(): Boolean = try {
         store = MapFile(mapFile)
@@ -90,6 +93,8 @@ class RoadNetwork(private val mapFile: File) {
         }
         store = null
         tiles.clear()
+        cachedGraph = null
+        cachedGraphKey = 0L
     }
 
     /**
@@ -113,6 +118,35 @@ class RoadNetwork(private val mapFile: File) {
             }
         }
         return out
+    }
+
+    /**
+     * A connected [RoadGraph] over the 3x3 tile block around a point.
+     *
+     * Built lazily and cached against the centre tile, because rebuilding costs a pass over a few
+     * thousand segments and the vehicle stays inside one z15 tile (about 1 km here) for a long
+     * time. Callers must treat segment indices as valid only for the instance they were given:
+     * crossing into a new block yields a different graph, and [AlongRoadTracker] re-localises when
+     * it sees one.
+     */
+    fun graphNear(lat: Double, lon: Double): RoadGraph? {
+        val store = this.store ?: return null
+        val tx = lonToTileX(lon, ZOOM)
+        val ty = latToTileY(lat, ZOOM)
+        val key = (tx.toLong() shl 32) or (ty.toLong() and 0xffffffffL)
+        cachedGraph?.let { if (cachedGraphKey == key) return it }
+
+        val segments = ArrayList<Segment>()
+        for (dx in -1..1) for (dy in -1..1) {
+            segments.addAll(tileSegments(store, tx + dx, ty + dy))
+        }
+        if (segments.isEmpty()) return null
+
+        val graph = RoadGraph(segments)
+        Log.i(TAG, "Graph at $tx/$ty: ${segments.size} segments, ${graph.nodeCount} nodes")
+        cachedGraph = graph
+        cachedGraphKey = key
+        return graph
     }
 
     private fun tileSegments(store: MapFile, x: Int, y: Int): List<Segment> {
