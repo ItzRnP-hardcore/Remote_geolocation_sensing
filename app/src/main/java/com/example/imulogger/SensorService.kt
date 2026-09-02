@@ -123,6 +123,11 @@ class SensorService : Service() {
 
         /** The IMU-only track, for drawing beside [track] so the divergence is visible. */
         val drTrack: StateFlow<List<TrackPoint>> = _drTrack.asStateFlow()
+
+        private val _snapTrack = MutableStateFlow<List<TrackPoint>>(emptyList())
+
+        /** The dead-reckoned track after being snapped onto the road network. */
+        val snapTrack: StateFlow<List<TrackPoint>> = _snapTrack.asStateFlow()
     }
 
     /** One recorded sensor stream: what to register, how fast, and what to call it in the CSV. */
@@ -246,6 +251,23 @@ class SensorService : Service() {
     private var trackDirty = false
 
     private val deadReckoner = DeadReckoner()
+
+    /**
+     * Map matching gets its own thread: reading a Mapsforge tile is disk I/O and the first read of
+     * a new area parses a few hundred ways, neither of which belongs on the 200 Hz logger thread.
+     */
+    private lateinit var matchThread: HandlerThread
+    private lateinit var matchHandler: Handler
+    private var roadNetwork: RoadNetwork? = null
+    private var mapMatcher: MapMatcher? = null
+    private var matchWriter: BufferedWriter? = null
+    private val snapPoints = ArrayList<TrackPoint>()
+    @Volatile private var snapLat: Double? = null
+    @Volatile private var snapLon: Double? = null
+    @Volatile private var snapCorrection: Double = 0.0
+    @Volatile private var snapRoadClass: String? = null
+    @Volatile private var snapConfidence: Double = 0.0
+    @Volatile private var headingCorrectionDeg: Double = 0.0
     private val drPoints = ArrayList<TrackPoint>()
     private var drWriter: BufferedWriter? = null
     private var lastDrSampleNs = 0L
@@ -261,6 +283,23 @@ class SensorService : Service() {
         loggerThread = HandlerThread("imu-logger", Process.THREAD_PRIORITY_FOREGROUND)
         loggerThread.start()
         loggerHandler = Handler(loggerThread.looper)
+
+        matchThread = HandlerThread("map-match", Process.THREAD_PRIORITY_BACKGROUND)
+        matchThread.start()
+        matchHandler = Handler(matchThread.looper)
+        matchHandler.post {
+            val maps = MapsforgeSource.mapFiles(this)
+            if (maps.isEmpty()) {
+                Log.w(TAG, "No offline map installed; map matching disabled")
+            } else {
+                val net = RoadNetwork(maps.first())
+                if (net.open()) {
+                    roadNetwork = net
+                    mapMatcher = MapMatcher(net)
+                    Log.i(TAG, "Map matching ready against ${maps.first().name}")
+                }
+            }
+        }
 
         mlThread = HandlerThread("imu-ml", Process.THREAD_PRIORITY_DEFAULT)
         mlThread.start()
@@ -371,6 +410,15 @@ class SensorService : Service() {
             Log.w(TAG, "GNSS callback was not registered", e)
         }
 
+        matchHandler.removeCallbacksAndMessages(null)
+        matchHandler.post { roadNetwork?.close() }
+        matchThread.quitSafely()
+        try {
+            matchThread.join(2_000)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+
         mlHandler.removeCallbacksAndMessages(null)
         mlThread.quitSafely()
         try {
@@ -422,6 +470,11 @@ class SensorService : Service() {
         lastDistanceLon = Double.NaN
         trackPoints.clear()
         drPoints.clear()
+        snapPoints.clear()
+        _snapTrack.value = emptyList()
+        snapLat = null; snapLon = null; snapCorrection = 0.0
+        snapRoadClass = null; snapConfidence = 0.0; headingCorrectionDeg = 0.0
+        matchHandler.post { mapMatcher?.reset() }
         deadReckoner.reset()
         calibrationStartTimeNs = 0L
         isCalibrating = true
@@ -444,6 +497,9 @@ class SensorService : Service() {
         gnssWriter = openWriter(dir, "gnss_status.csv")
         gnssWriter?.write("t_ns,sats_visible,sats_used,mean_cn0_used_dbhz,max_cn0_dbhz\n")
 
+        matchWriter = openWriter(dir, "mapmatch.csv")
+        matchWriter?.write("t_ns,dr_lat,dr_lon,snap_lat,snap_lon,correction_m,road_class,confidence,heading_applied_deg\n")
+
         mlWriter = openWriter(dir, "ml.csv")
         mlWriter?.write("t_ns,mu,logvar,stationary_logit,yaw_rate\n")
 
@@ -465,10 +521,38 @@ class SensorService : Service() {
         )
     }
 
+    /** Runs on the logger thread; the matcher posts its results back here to be written. */
+    private fun recordMatch(tNs: Long, dr: TrackPoint, m: MapMatcher.Match) {
+        snapPoints.add(TrackPoint(m.lat, m.lon, GnssQuality.GOOD))
+        _snapTrack.value = ArrayList(snapPoints)
+
+        // Close the loop: hand the matched road's bearing back to the integrator as a heading
+        // observation. Position is deliberately not corrected — the snapped track is drawn from
+        // the matcher's own output, and teleporting the integrator would destroy the very
+        // divergence this app exists to measure.
+        var appliedDeg = 0.0
+        if (m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE) {
+            appliedDeg = deadReckoner.applyHeadingCorrection(
+                m.roadBearingDeg, MapMatcher.HEADING_FEEDBACK_GAIN,
+            )
+        }
+        headingCorrectionDeg = deadReckoner.headingCorrectionDeg
+
+        val sb = rowBuilder
+        sb.setLength(0)
+        sb.append(tNs).append(',')
+            .append(dr.lat).append(',').append(dr.lon).append(',')
+            .append(m.lat).append(',').append(m.lon).append(',')
+            .append(m.correctionM).append(',')
+            .append(m.roadClass).append(',')
+            .append(m.confidence).append('\n')
+        writeRow(matchWriter, sb)
+    }
+
     /** Runs on the logger thread during shutdown. */
     private fun closeSession() {
         sessionDir?.let { writeSessionMetadata(it, finished = true) }
-        for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, drWriter, mlWriter)) {
+        for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, drWriter, mlWriter, matchWriter)) {
             try {
                 w.flush()
                 w.close()
@@ -481,6 +565,7 @@ class SensorService : Service() {
         gnssWriter = null
         drWriter = null
         mlWriter = null
+        matchWriter = null
     }
 
     private fun openWriter(dir: File, name: String): BufferedWriter =
@@ -498,6 +583,7 @@ class SensorService : Service() {
                 gnssWriter?.flush()
                 drWriter?.flush()
                 mlWriter?.flush()
+                matchWriter?.flush()
             } catch (e: Exception) {
                 writeErrors++
                 Log.e(TAG, "Flush failed", e)
@@ -518,6 +604,26 @@ class SensorService : Service() {
                         p.copy(quality = if (unaided) GnssQuality.LOST else GnssQuality.GOOD)
                     )
                     _drTrack.value = ArrayList(drPoints)
+
+                    // Snap only while the integrator is unaided. With GNSS anchoring every
+                    // second there is nothing to correct, and matching a good fix just adds
+                    // latency and a chance to snap onto the wrong parallel road.
+                    if (unaided) {
+                        val course = deadReckoner.courseDeg
+                        val speed = deadReckoner.speed
+                        val uncertainty = deadReckoner.driftMetres
+                        val tNs = SystemClock.elapsedRealtimeNanos()
+                        matchHandler.post {
+                            val m = mapMatcher?.update(p.lat, p.lon, course, speed, uncertainty)
+                            if (m != null) {
+                                snapLat = m.lat; snapLon = m.lon
+                                snapCorrection = m.correctionM
+                                snapRoadClass = m.roadClass
+                                snapConfidence = m.confidence
+                                loggerHandler.post { recordMatch(tNs, p, m) }
+                            }
+                        }
+                    }
                 }
             }
             loggerHandler.postDelayed(this, FLUSH_INTERVAL_MS)
@@ -550,6 +656,12 @@ class SensorService : Service() {
             stationary = deadReckoner.isStationary,
             deviceAzimuth = latestAzimuthDeg,
             distanceMetres = distanceMetres,
+            snapLat = snapLat,
+            snapLon = snapLon,
+            snapCorrectionM = snapCorrection,
+            snapRoadClass = snapRoadClass,
+            snapConfidence = snapConfidence,
+            headingCorrectionDeg = headingCorrectionDeg,
             drSpeedMps = deadReckoner.speed,
             mlMu = mlMu,
             mlStationaryProbability =

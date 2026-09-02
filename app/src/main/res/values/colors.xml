@@ -24,4 +24,5 @@
 
     <color name="action_record">#0A84FF</color>
     <color name="action_armed">#D03B3B</color>
+    <color name="track_snap">#0C7A3E</color>
 </resources>

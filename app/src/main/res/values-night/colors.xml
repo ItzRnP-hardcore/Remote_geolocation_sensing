@@ -8,4 +8,5 @@
     <color name="quality_idle">#9C9B95</color>
     <color name="track">#7FB0F0</color>
     <color name="track_imu">#F09A76</color>
+    <color name="track_snap">#5FD08A</color>
 </resources>

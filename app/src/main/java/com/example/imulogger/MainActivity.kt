@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var trackLine: Polyline
     private lateinit var drLine: Polyline
+    private lateinit var snapLine: Polyline
     private lateinit var marker: Marker
     private lateinit var drMarker: Marker
     private lateinit var locationOverlay: MyLocationNewOverlay
@@ -49,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private var followPosition = true
     private var trackSize = 0
     private var drSize = 0
+    private var snapSize = 0
 
     private var radiusKm = 10.0
     private var lastPrefetchCentre: GeoPoint? = null
@@ -130,6 +132,7 @@ class MainActivity : AppCompatActivity() {
                 launch { SensorService.status.collect { render(it) } }
                 launch { SensorService.track.collect { drawTrack(it) } }
                 launch { SensorService.drTrack.collect { drawDrTrack(it) } }
+                launch { SensorService.snapTrack.collect { drawSnapTrack(it) } }
             }
         }
     }
@@ -253,6 +256,12 @@ class MainActivity : AppCompatActivity() {
             outlinePaint.strokeWidth = 7f
             outlinePaint.pathEffect = DashPathEffect(floatArrayOf(18f, 12f), 0f)
         }
+        // The snapped track sits under both so the raw tracks stay readable over it.
+        snapLine = Polyline(this).apply {
+            outlinePaint.color = ContextCompat.getColor(context, R.color.track_snap)
+            outlinePaint.strokeWidth = 12f
+            outlinePaint.alpha = 200
+        }
         marker = Marker(this).apply {
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             icon = ContextCompat.getDrawable(context, R.drawable.ic_position)
@@ -261,6 +270,7 @@ class MainActivity : AppCompatActivity() {
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             icon = ContextCompat.getDrawable(context, R.drawable.ic_position_imu)
         }
+        overlays.add(snapLine)
         overlays.add(trackLine)
         overlays.add(drLine)
         overlays.add(drMarker)
@@ -369,6 +379,13 @@ class MainActivity : AppCompatActivity() {
      * contiguous runs of non-GOOD points become their own overlays laid over the base line,
      * starting one point early so they visually join the healthy track either side.
      */
+    private fun drawSnapTrack(points: List<TrackPoint>) {
+        if (points.size == snapSize) return
+        snapSize = points.size
+        snapLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        binding.map.invalidate()
+    }
+
     private fun rebuildQualitySegments(
         points: List<TrackPoint>,
         baseLine: Polyline,
@@ -778,6 +795,15 @@ class MainActivity : AppCompatActivity() {
 
         binding.legendGps.setTextColor(ContextCompat.getColor(this, R.color.track))
         binding.legendImu.setTextColor(ContextCompat.getColor(this, R.color.track_imu))
+        binding.legendSnap.setTextColor(ContextCompat.getColor(this, R.color.track_snap))
+        binding.legendSnap.text = if (status.running && status.snapLat != null) {
+            String.format(
+                Locale.US, "Snapped %s %.0f m (%.0f%%)", "·",
+                status.snapCorrectionM, 100 * status.snapConfidence,
+            )
+        } else {
+            getString(R.string.legend_snap)
+        }
         // Folding live speed into the legend gives the most legible real-time proof that
         // something is working, without another row of chrome.
         binding.legendGps.text =

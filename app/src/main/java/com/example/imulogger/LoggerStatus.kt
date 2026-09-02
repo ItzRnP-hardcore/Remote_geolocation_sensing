@@ -60,6 +60,18 @@ data class LoggerStatus(
     val mlInferences: Long = 0,
     val mlDropped: Long = 0,
 
+    /** Map-matched position: the dead-reckoned fix snapped onto the road network. */
+    val snapLat: Double? = null,
+    val snapLon: Double? = null,
+
+    /** Metres the matcher moved the fix to put it on a road. */
+    val snapCorrectionM: Double = 0.0,
+    val snapRoadClass: String? = null,
+    val snapConfidence: Double = 0.0,
+
+    /** Cumulative degrees the map has rotated the integrator's course this session. */
+    val headingCorrectionDeg: Double = 0.0,
+
     /** Ground distance covered so far, from GNSS. The denominator of the benchmark. */
     val distanceMetres: Double = 0.0,
 

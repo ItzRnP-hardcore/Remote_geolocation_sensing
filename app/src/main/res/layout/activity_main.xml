@@ -209,6 +209,15 @@
                         android:textSize="13sp" />
 
                     <TextView
+                        android:id="@+id/legendSnap"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/legend_snap"
+                        android:textStyle="bold"
+                        android:textSize="13sp" />
+
+                    <TextView
                         android:id="@+id/legendImu"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"

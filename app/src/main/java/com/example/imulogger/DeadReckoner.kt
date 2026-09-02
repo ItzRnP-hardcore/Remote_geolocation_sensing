@@ -41,6 +41,20 @@ class DeadReckoner {
 
         /** A dt larger than this means samples were dropped; integrating across it invents motion. */
         const val MAX_DT_S = 0.05
+
+        /** Below this, the velocity vector has no meaningful direction to correct. */
+        const val MIN_SPEED_FOR_HEADING_FIX = 2.0
+
+        /**
+         * Most the map may rotate the course in one update, degrees.
+         *
+         * This is the safety valve on a feedback loop: the matcher feeds heading back into the
+         * integrator, so one confident match onto the wrong road would otherwise swing the
+         * estimate straight onto it and then keep it there. Capping the step means a wrong road
+         * has to be believed repeatedly before it can do real damage, and a right one still pulls
+         * the heading in within a few seconds.
+         */
+        const val MAX_HEADING_STEP_DEG = 4.0
     }
 
     /** Position in the local tangent plane, metres east/north of the origin. */
@@ -90,7 +104,62 @@ class DeadReckoner {
 
     val speed: Double get() = sqrt(vE * vE + vN * vN)
 
+    /**
+     * Direction of travel in degrees clockwise from north, or null when too slow for the
+     * direction of the velocity vector to mean anything. This is the quantity the map matcher
+     * compares against road bearing, and the quantity dead reckoning is worst at.
+     */
+    val courseDeg: Double?
+        get() {
+            if (speed < 0.3) return null
+            val deg = Math.toDegrees(kotlin.math.atan2(vE, vN))
+            return if (deg < 0) deg + 360 else deg
+        }
+
     fun bias(): DoubleArray = doubleArrayOf(bE, bN, bU)
+
+    /** Total degrees the map has rotated the course this session, for observability. */
+    var headingCorrectionDeg: Double = 0.0
+        private set
+
+    /**
+     * Rotate the course toward a road bearing, keeping speed untouched.
+     *
+     * This is the whole point of map matching for this project. Integrated speed is competitive —
+     * measured at 3.10 m/s against GPS's 3.36 on a recorded run — while heading is where the
+     * error lives, and a road's bearing is an observation of exactly the quantity the IMU cannot
+     * recover for itself. Speed is deliberately left alone: correcting a channel that is already
+     * good would only inject the map's error into it.
+     *
+     * The road direction is ambiguous on a two-way road, so the nearer of the two is taken;
+     * [gain] scales how much of the disagreement is absorbed per update. Returns the degrees
+     * actually applied.
+     */
+    fun applyHeadingCorrection(roadBearingDeg: Double, gain: Double): Double {
+        val sp = speed
+        if (sp < MIN_SPEED_FOR_HEADING_FIX) return 0.0
+
+        val course = Math.toDegrees(kotlin.math.atan2(vE, vN))
+        // A road carries traffic both ways; the direction we are actually going is the one that
+        // disagrees least with where we already think we are heading.
+        val forward = signedDelta(roadBearingDeg, course)
+        val backward = signedDelta(roadBearingDeg + 180.0, course)
+        val delta = if (abs(forward) <= abs(backward)) forward else backward
+
+        val applied = (gain * delta).coerceIn(-MAX_HEADING_STEP_DEG, MAX_HEADING_STEP_DEG)
+        val corrected = Math.toRadians(course + applied)
+        vE = sp * kotlin.math.sin(corrected)
+        vN = sp * kotlin.math.cos(corrected)
+        headingCorrectionDeg += abs(applied)
+        return applied
+    }
+
+    private fun signedDelta(target: Double, from: Double): Double {
+        var d = (target - from) % 360.0
+        if (d > 180) d -= 360.0
+        if (d < -180) d += 360.0
+        return d
+    }
 
     // ------------------------------------------------------------------ inputs
 
@@ -224,5 +293,6 @@ class DeadReckoner {
         driftMetres = 0.0
         stillFor = 0.0
         isStationary = false
+        headingCorrectionDeg = 0.0
     }
 }
