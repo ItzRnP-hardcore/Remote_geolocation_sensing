@@ -367,7 +367,10 @@ class SensorService : Service() {
                 mlInferences++
                 // Writing goes back to the logger thread so there stays exactly one writer and
                 // the no-locking invariant in this class holds.
-                loggerHandler.post { writeMlRow(tNs, mu, logvar, stationary, yaw) }
+                loggerHandler.post {
+                    writeMlRow(tNs, mu, logvar, stationary, yaw)
+                    fuseModelSpeed(mu, logvar, stationary)
+                }
             } finally {
                 mlPending.decrementAndGet()
             }
@@ -385,6 +388,33 @@ class SensorService : Service() {
             .append(yaw).append('\n')
         writeRow(mlWriter, sb)
     }
+
+    /**
+     * Runs on the logger thread: let the model's speed estimate correct the integrator.
+     *
+     * Applied only while unaided. GNSS velocity is better than anything a network inferring from
+     * a phone IMU can offer, so whenever a fix is arriving the model has nothing to add and every
+     * opportunity to do harm.
+     *
+     * Off by default - see [IMUModelRunner.speedFusionEnabled] for the measurement that keeps it
+     * that way. The rest of this is ready for a checkpoint worth trusting.
+     */
+    private fun fuseModelSpeed(mu: Float, logvar: Float, stationaryLogit: Float) {
+        if (!IMUModelRunner.speedFusionEnabled) return
+        if (!unaidedNow()) return
+        // A confident stand-still call is an observation that speed is zero, not a reason to skip:
+        // it is the one prediction the model can make that the integrator cannot check for itself.
+        val target =
+            if (stationaryLogit >= IMUModelRunner.STATIONARY_LOGIT_THRESHOLD) 0.0
+            else mu.toDouble()
+        deadReckoner.applyModelSpeed(target, IMUModelRunner.fusionWeight(logvar))
+    }
+
+    /** True when the integrator is running without a GNSS anchor. Logger thread. */
+    private fun unaidedNow(): Boolean =
+        freeRunRequested ||
+            lastFixRealtimeNs == 0L ||
+            (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNs) > 5_000_000_000L
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -718,9 +748,7 @@ class SensorService : Service() {
                 if (drPoints.lastOrNull()?.let { it.lat != p.lat || it.lon != p.lon } != false) {
                     // Mark the stretch where the integrator is running without GNSS help, which
                     // is exactly the stretch whose divergence the demo is about.
-                    val unaided = freeRunRequested ||
-                        lastFixRealtimeNs == 0L ||
-                        (SystemClock.elapsedRealtimeNanos() - lastFixRealtimeNs) > 5_000_000_000L
+                    val unaided = unaidedNow()
                     drPoints.add(
                         p.copy(quality = if (unaided) GnssQuality.LOST else GnssQuality.GOOD)
                     )

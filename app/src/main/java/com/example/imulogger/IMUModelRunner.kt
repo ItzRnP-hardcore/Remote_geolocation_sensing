@@ -8,6 +8,7 @@ import org.pytorch.Module
 import org.pytorch.Tensor
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.exp
 
 /**
  * Runs the ResNet1D displacement model over a sliding window of levelled IMU samples.
@@ -33,6 +34,58 @@ class IMUModelRunner(context: Context) {
         const val IDX_LOGVAR = 1
         const val IDX_STATIONARY = 2
         const val IDX_YAW_RATE = 3
+
+        /**
+         * Master switch for feeding [IDX_MU] into the integrator's speed channel.
+         *
+         * Off, because the shipped checkpoint is not fit to steer anything. Scored against GPS
+         * speed over 3,584 inferences from four recorded sessions:
+         *
+         * ```
+         *   correlation with GPS speed   -0.224      (negative)
+         *   RMSE                          2.566 m/s
+         *   RMSE of predicting a constant 1.277 m/s  (the GPS mean)
+         *   mu range                      0.02 - 0.69 m/s
+         *   GPS speed range               0.03 - 5.10 m/s
+         * ```
+         *
+         * It is twice as bad as a constant, anti-correlated with the truth, cannot reach the
+         * upper half of the speed range at all, and on the session recorded stationary (GPS mean
+         * 0.039 m/s) it reported 0.681 m/s. The integrator's own 37% distance shortfall is far
+         * better than this, so switching it on today would make the app worse, not better.
+         *
+         * The plumbing below is nonetheless complete and correct. When the model is retrained,
+         * run `python -m eval.model_speed_eval <sessions>` and enable this only if mu beats the
+         * constant baseline.
+         */
+        @Volatile
+        var speedFusionEnabled = false
+
+        /**
+         * Assumed 1-sigma error on the integrator's own speed, m/s, used as the other half of the
+         * gain. Deliberately a constant: this class has no covariance to offer, and a fixed value
+         * makes the trade explicit rather than hiding it behind a filter that was never tuned.
+         */
+        private const val DR_SPEED_SIGMA_MPS = 1.0
+
+        /**
+         * Stationary logit above which the model is asserting stand-still, so the speed target
+         * becomes zero. Roughly 88% confidence through the sigmoid.
+         */
+        const val STATIONARY_LOGIT_THRESHOLD = 2.0
+
+        /**
+         * Scalar Kalman gain from the model's own reported variance.
+         *
+         * exp(logvar) is the model's variance on mu; weighting it against [DR_SPEED_SIGMA_MPS]
+         * means a confident model moves the estimate a long way and an unsure one barely at all.
+         * This is what the logvar head is for, and ignoring it would make the extra head pointless.
+         */
+        fun fusionWeight(logvar: Float): Double {
+            val modelVar = exp(logvar.toDouble()).coerceAtLeast(1e-6)
+            val drVar = DR_SPEED_SIGMA_MPS * DR_SPEED_SIGMA_MPS
+            return drVar / (drVar + modelVar)
+        }
     }
 
     private val module: Module = LiteModuleLoader.load(assetFilePath(context, MODEL_ASSET))

@@ -55,6 +55,14 @@ class DeadReckoner {
          * the heading in within a few seconds.
          */
         const val MAX_HEADING_STEP_DEG = 4.0
+
+        /**
+         * Below this the velocity vector has no direction to preserve, so a speed estimate
+         * cannot be applied: scaling a zero vector leaves it zero, and inventing a direction
+         * would be worse than declining. A model that believes the vehicle is moving while the
+         * integrator believes it is stopped is a disagreement only GNSS can settle.
+         */
+        const val MIN_SPEED_FOR_MODEL_FIX = 0.3
     }
 
     /** Position in the local tangent plane, metres east/north of the origin. */
@@ -120,6 +128,10 @@ class DeadReckoner {
 
     /** Total degrees the map has rotated the course this session, for observability. */
     var headingCorrectionDeg: Double = 0.0
+        private set
+
+    /** Total m/s the model has adjusted speed by this session, for observability. */
+    var modelSpeedCorrectionMps: Double = 0.0
         private set
 
     /**
@@ -259,21 +271,38 @@ class DeadReckoner {
         vU = 0.0
     }
 
-    // applyMLCorrection was removed deliberately. It took the model's mu - a displacement in
-    // METRES - and passed it where this class expects DEGREES, so every call overshot by a
-    // factor of about 11. It also added the same offset to both north and east regardless of
-    // heading, which drives the estimate northeast at 45 degrees no matter which way the vehicle
-    // points, and it accumulated at 10 Hz.
-    //
-    // When the model is trained and validated, the correct coupling is a velocity update along
-    // the current heading, not a position nudge: something like
-    //
-    //     fun applyModelSpeed(speedMps: Double) {
-    //         val h = atan2(vE, vN)
-    //         vE = speedMps * sin(h); vN = speedMps * cos(h)
-    //     }
-    //
-    // which is dimensionally sound and lets the existing integration carry it into position.
+    /**
+     * Blend a model speed estimate into the velocity magnitude, leaving direction untouched.
+     *
+     * This is the coupling the deleted `applyMLCorrection` should have been. That one took the
+     * model's mu - a speed in m/s - and passed it where this class expected degrees, then added
+     * the same offset to north and east regardless of heading, driving the estimate northeast at
+     * 45 degrees whatever way the vehicle pointed, at 10 Hz. Speed is a scalar observation of the
+     * velocity vector's magnitude and nothing else, so that is all it is allowed to touch here;
+     * the existing integration carries it into position on its own.
+     *
+     * [weight] is a scalar Kalman gain in [0, 1] formed from the model's reported variance against
+     * an assumed integrator variance - see [IMUModelRunner.fusionWeight]. A model that declares
+     * itself uncertain therefore moves the estimate less, which is the entire reason the network
+     * has a logvar head at all.
+     *
+     * Returns the m/s actually applied, signed.
+     */
+    fun applyModelSpeed(modelSpeedMps: Double, weight: Double): Double {
+        val sp = speed
+        if (sp < MIN_SPEED_FOR_MODEL_FIX) return 0.0
+        val w = weight.coerceIn(0.0, 1.0)
+        if (w <= 0.0) return 0.0
+
+        val target = modelSpeedMps.coerceAtLeast(0.0)
+        val blended = sp + w * (target - sp)
+        val delta = blended - sp
+        val scale = blended / sp
+        vE *= scale
+        vN *= scale
+        modelSpeedCorrectionMps += abs(delta)
+        return delta
+    }
 
     private fun setOrigin(lat: Double, lon: Double) {
         originLat = lat
@@ -298,5 +327,6 @@ class DeadReckoner {
         stillFor = 0.0
         isStationary = false
         headingCorrectionDeg = 0.0
+        modelSpeedCorrectionMps = 0.0
     }
 }
