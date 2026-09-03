@@ -27,3 +27,9 @@ ml_model/data_raw/
 # Offline map archives are hundreds of MB; side-load them instead.
 # See README: adb push eastern-zone.map .../files/osmdroid/
 *.map
+
+# Derived training artefacts and sweep checkpoints
+ml_model/dataset_iovnbd*.pt
+ml_model/dataset_iovnbd*_meta.json
+ml_model/model_*.pth
+ml_model/train_sweep.log

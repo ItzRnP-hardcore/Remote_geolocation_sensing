@@ -46,6 +46,31 @@ def seg_len_m(s):
 class RoadGraph:
     """Segments plus the adjacency recovered by snapping their endpoints."""
 
+    def candidates(self, lat, lon):
+        """Segment indices whose bounding box touches the 3x3 cell block at a point."""
+        ci, cj = int(lat / CELL), int(lon / CELL)
+        out = set()
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                out |= self._grid.get((ci + di, cj + dj), _EMPTY)
+        return out
+
+    def _build_index(self):
+        """Grid over spanned cells.
+
+        Spanned, not endpoint: a segment longer than the search block can pass beside
+        the query point with both ends outside it. Only 0.2% of segments are that
+        long, but they are motorway links and dual carriageways - exactly the roads a
+        vehicle is on at speed.
+        """
+        self._grid = {}
+        for i, s in enumerate(self.segs):
+            i0, i1 = sorted((int(s[0] / CELL), int(s[2] / CELL)))
+            j0, j1 = sorted((int(s[1] / CELL), int(s[3] / CELL)))
+            for ci in range(i0, i1 + 1):
+                for cj in range(j0, j1 + 1):
+                    self._grid.setdefault((ci, cj), set()).add(i)
+
     def __init__(self, segs, tol_m=SNAP_TOL_M):
         # segs: list of (alat, alon, blat, blon, bearing)
         self.segs = segs
@@ -70,6 +95,7 @@ class RoadGraph:
             self.at_node[a].append((i, 0))
             self.at_node[b].append((i, 1))
         self.n_nodes = len(nodes)
+        self._build_index()
 
     def point_at(self, seg_i, offset_m, direction):
         """Coordinates `offset_m` along a segment, travelling in `direction`."""
@@ -99,11 +125,22 @@ class RoadGraph:
         return out
 
 
+CELL = 0.002          # ~222 m of latitude; see RoadGraph._build_index
+_EMPTY = frozenset()
+
+
 def nearest_state(graph, lat, lon, course_deg, radius_m=80.0):
-    """Best (segment, offset, direction) for a position and a course."""
+    """Best (segment, offset, direction) for a position and a course.
+
+    Candidates come from a grid rather than a scan over every segment. On the
+    Kharagpur network a scan cost about 0.02 s, which was tolerable; on the 155,050
+    segment UK network it costs 0.125 s, which is the entire budget at 10 Hz for a
+    single call.
+    """
     ml = mlon(lat)
     best = None
-    for i, s in enumerate(graph.segs):
+    for i in graph.candidates(lat, lon):
+        s = graph.segs[i]
         ax, ay = (s[1] - lon) * ml, (s[0] - lat) * M_PER_DEG_LAT
         bx, by = (s[3] - lon) * ml, (s[2] - lat) * M_PER_DEG_LAT
         dx, dy = bx - ax, by - ay

@@ -96,9 +96,18 @@ class Roads:
             n = (b[0] - a[0]) * M_PER_DEG_LAT
             self.segs.append((a[0], a[1], b[0], b[1],
                               (math.degrees(math.atan2(e, n)) + 360) % 360))
+        # Index every cell a segment's bounding box touches, not just the cells its
+        # endpoints land in. Endpoint indexing silently loses long segments: a 1.3 km
+        # motorway link can pass metres from a query point with both ends outside the
+        # 3x3 search block, and near() would never consider it. Measured on the UK
+        # network, that produced 46 false outliers in one run, the index reporting
+        # 199.5 m where a brute-force scan gives 2.2 m.
         for i, s in enumerate(self.segs):
-            for la, lo in ((s[0], s[1]), (s[2], s[3])):
-                self.grid.setdefault((int(la / self.CELL), int(lo / self.CELL)), set()).add(i)
+            i0, i1 = sorted((int(s[0] / self.CELL), int(s[2] / self.CELL)))
+            j0, j1 = sorted((int(s[1] / self.CELL), int(s[3] / self.CELL)))
+            for ci in range(i0, i1 + 1):
+                for cj in range(j0, j1 + 1):
+                    self.grid.setdefault((ci, cj), set()).add(i)
 
     def __bool__(self):
         return bool(self.segs)
