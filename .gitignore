@@ -31,7 +31,7 @@ ml_model/data_raw/
 # Derived training artefacts and sweep checkpoints
 ml_model/dataset_iovnbd*.pt
 ml_model/dataset_iovnbd*_meta.json
-ml_model/model_data.pth
+ml_model/model_data*.pth
 ml_model/model_kin*.pth
 ml_model/model_cen*.pth
 ml_model/train_sweep.log
