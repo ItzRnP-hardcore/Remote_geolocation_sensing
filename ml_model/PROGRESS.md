@@ -24,6 +24,33 @@ Reference points on that set:
 | 3 | + kinematic loss `v_t = v_{t-1} + a·dt` | same | 0 | 4.969 / 5.063 / 6.030 at w = 0.01 / 0.05 / 0.2 | **hurts monotonically**; refutes the execution plan's constraint |
 | 4 | 2x data (yaw gate relaxed) | 19.9 h, 26 runs, 8,804 train windows | 0,1,2 | **5.30 / 5.31 / 5.45** | **+8.7% WORSE** |
 
+## First things that beat the baseline (single seed, being confirmed)
+
+Augmentation is the first training-side change to help. On the clean 10 runs at full
+capacity:
+
+| config | test RMSE | vs base | speed bias | 300 s drift | vs base |
+|---|---|---|---|---|---|
+| baseline | 4.877 | — | -1.410 | 20.89% | — |
+| dropout 0.3 + rotation | **4.669** | **-4.3%** | -0.977 | 19.60% | -6.2% |
+| rotation + gain + noise | 4.712 | -3.4% | -0.996 | 19.56% | -6.4% |
+| quality weighting + rotation (26 runs) | 4.768 | -2.2% | -1.038 | **18.57%** | **-11.1%** |
+| stationary debias + rotation | 4.875 | -0.0% | **-0.403** | — | — |
+
+Two things worth reading carefully.
+
+**RMSE and drift disagree**, which is why `eval/rank_models.py` exists. The lowest-RMSE
+model is not the best navigator: `cl_d3rot` wins on RMSE and `wq_rot` wins at 300 s.
+The baseline is still best at 60 s. The new configurations win where it matters most -
+long outages - and lose on short ones.
+
+**Bias falls faster than RMSE.** Stationary debiasing plus rotation cuts the speed bias
+from -1.410 to -0.403 while barely moving RMSE. For dead reckoning that trade is
+favourable: a bias integrates into displacement while zero-mean scatter partly cancels.
+
+These gaps are a few percent on ONE seed, which is the size that has already misled
+this project once. Three seeds of each are running before any of it is believed.
+
 ## The central finding (2026-09-04)
 
 The model is **massively overfitting**, not data-limited. On the 10-run set:
