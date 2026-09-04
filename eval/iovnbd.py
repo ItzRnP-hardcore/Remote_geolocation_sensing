@@ -100,8 +100,17 @@ MIN_RUN_SAMPLES = 600            # 60 s; shorter runs cannot host a 60 s outage
 MIN_SPEED_CORRELATION = 0.90
 MAX_POSITION_OFFSET_M = 60.0
 
-# The yaw axis has to be identifiable or there is no attitude at all. Well-aligned
-# runs reach 0.95; anything near zero means the cross-correlation found noise.
+# The yaw axis has to be identifiable or there is no ATTITUDE. Well-aligned runs reach
+# 0.95; anything near zero means the cross-correlation found noise, which in practice
+# means the phone was not rigidly mounted (those runs carry about twice the
+# accelerometer noise) so its gyro measures the phone rather than the vehicle.
+#
+# This gates attitude, NOT speed labels. A loosely mounted phone still records real
+# acceleration against a real reference speed, and for training the speed head those
+# runs are usable - and valuable, because mounting variety is exactly what the model
+# currently fails to generalise across. So the threshold is a CLI option, every run
+# carries its own yaw_r, and the npz exports an attitude_ok flag so a consumer that
+# genuinely needs attitude can still filter.
 MIN_YAW_CORRELATION = 0.50
 
 M_PER_DEG_LAT = 111_132.0
@@ -370,7 +379,8 @@ def convert_run(s: np.ndarray, v: np.ndarray, name: str, up_dev: np.ndarray,
     }
 
 
-def load_session(name: str, s_path: str, v_path: str, use_mag: bool = True):
+def load_session(name: str, s_path: str, v_path: str, use_mag: bool = True,
+                 min_yaw: float = MIN_YAW_CORRELATION):
     """Every accepted run in one session pair, with the rejection record.
 
     Returns (runs, records). `records` always has one entry per candidate run,
@@ -427,11 +437,9 @@ def load_session(name: str, s_path: str, v_path: str, use_mag: bool = True):
                        reason=f"speed correlation {corr:.3f} below {MIN_SPEED_CORRELATION}")
             records.append(rec)
             continue
-        if abs(yaw_r) < MIN_YAW_CORRELATION:
-            # Without an identified yaw axis there is no attitude, so the run cannot
-            # be converted at all - better to say so than to guess a column.
+        if abs(yaw_r) < min_yaw:
             rec.update(accepted=False,
-                       reason=f"yaw axis correlation {yaw_r:.3f} below {MIN_YAW_CORRELATION}")
+                       reason=f"yaw axis correlation {yaw_r:.3f} below {min_yaw}")
             records.append(rec)
             continue
         if not np.isfinite(med) or med > MAX_POSITION_OFFSET_M:
@@ -441,7 +449,10 @@ def load_session(name: str, s_path: str, v_path: str, use_mag: bool = True):
             continue
 
         run = convert_run(sa, va, run_name, up_dev, yaw_sign)
+        run["attitude_ok"] = bool(abs(yaw_r) >= MIN_YAW_CORRELATION)
+        run["yaw_r"] = float(yaw_r)
         rec.update(accepted=True,
+                   attitude_ok=bool(abs(yaw_r) >= MIN_YAW_CORRELATION),
                    duration_s=round(float(run["t_s"][-1]), 1),
                    speed_mean_ms=round(float(np.nanmean(run["truth_speed"])), 2),
                    speed_max_ms=round(float(np.nanmax(run["truth_speed"])), 2),
@@ -512,6 +523,9 @@ def main(argv=None) -> int:
     ap.add_argument("--no-mag", action="store_true",
                     help="run the AHRS without the magnetometer")
     ap.add_argument("--manifest", default="iovnbd_manifest.json")
+    ap.add_argument("--min-yaw-corr", type=float, default=MIN_YAW_CORRELATION,
+                    help="yaw-axis correlation gate; lower it to keep runs usable "
+                         "for speed but not for attitude")
     args = ap.parse_args(argv)
 
     pairs = discover_sessions(args.root)
@@ -530,7 +544,8 @@ def main(argv=None) -> int:
     all_records, bundles = [], []
     for name, sp, vp in pairs:
         try:
-            runs, records = load_session(name, sp, vp, use_mag=not args.no_mag)
+            runs, records = load_session(name, sp, vp, use_mag=not args.no_mag,
+                                         min_yaw=args.min_yaw_corr)
         except Exception as exc:                       # noqa: BLE001
             print(f"{name:<16}  ERROR {exc}")
             all_records.append(dict(name=name, accepted=False, reason=f"error: {exc}"))
@@ -577,6 +592,8 @@ def main(argv=None) -> int:
         flat["run_starts"] = np.cumsum([0, *lens[:-1]])
         flat["run_lengths"] = np.asarray(lens)
         flat["run_names"] = np.asarray([b["name"] for b in bundles])
+        flat["run_attitude_ok"] = np.asarray([b.get("attitude_ok", True) for b in bundles])
+        flat["run_yaw_r"] = np.asarray([b.get("yaw_r", float("nan")) for b in bundles])
         np.savez_compressed(args.npz, **flat)
         print(f"npz -> {args.npz}  ({flat['accel'].shape[0]:,} samples)")
 

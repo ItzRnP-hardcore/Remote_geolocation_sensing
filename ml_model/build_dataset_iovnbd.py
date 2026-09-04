@@ -120,17 +120,57 @@ def build(npz_path: str, frame: str):
     return X, Y, R, names
 
 
-def split_by_run(run_ids, n_runs, seed: int = 0):
-    """Whole runs to train/val/test. Deterministic, so a rerun is comparable."""
+def split_by_run(run_ids, n_runs, seed: int = 0, names=None, fixed_test=()):
+    """Whole runs to train/val/test, balanced by WINDOW count.
+
+    Splitting on run boundaries is non-negotiable - windows overlap 50%, so any split
+    that cuts between them reports partial memorisation. But assigning a fixed FRACTION
+    OF RUNS is wrong when run lengths differ by an order of magnitude: on the 26-run
+    set that put 4,729 windows in validation against 5,755 in training. So runs are
+    assigned greedily, longest first, to whichever split is furthest below its target
+    share of windows.
+
+    [fixed_test] pins named runs to the test split. Holding the test set constant
+    across experiments is what makes "did more data help" answerable at all; letting it
+    move means every comparison also changes its own yardstick.
+    """
+    counts = np.bincount(run_ids, minlength=n_runs).astype(float)
+    which_run = np.zeros(n_runs, dtype=int)
+    assigned = np.zeros(n_runs, dtype=bool)
+
+    pinned = set()
+    if names is not None:
+        for i, nm in enumerate(names):
+            if nm in fixed_test:
+                which_run[i] = 2
+                assigned[i] = True
+                pinned.add(i)
+
+    total = counts.sum()
+    target = {0: (1 - VAL_FRACTION - TEST_FRACTION) * total,
+              1: VAL_FRACTION * total,
+              2: TEST_FRACTION * total}
+    have = {0: 0.0, 1: 0.0, 2: float(counts[list(pinned)].sum()) if pinned else 0.0}
+
+    # Pinning is exclusive: naming the test runs means those runs AND NO OTHERS are
+    # the test set. Topping it up to a target share would quietly change the yardstick
+    # between experiments, which defeats the point of pinning it.
+    splits = (0, 1) if pinned else (0, 1, 2)
+
     rng = np.random.default_rng(seed)
-    order = rng.permutation(n_runs)
-    n_test = max(1, int(round(TEST_FRACTION * n_runs)))
-    n_val = max(1, int(round(VAL_FRACTION * n_runs)))
-    test_runs = set(order[:n_test].tolist())
-    val_runs = set(order[n_test:n_test + n_val].tolist())
-    which = np.where(np.isin(run_ids, list(test_runs)), 2,
-                     np.where(np.isin(run_ids, list(val_runs)), 1, 0))
-    return which, sorted(test_runs), sorted(val_runs)
+    order = sorted((i for i in range(n_runs) if not assigned[i]),
+                   key=lambda i: (-counts[i], rng.random()))
+    for i in order:
+        # Furthest below target, measured as a shortfall fraction so the splits
+        # compete on the same scale.
+        pick = min(splits, key=lambda k: (have[k] - target[k]) / max(target[k], 1))
+        which_run[i] = pick
+        have[pick] += counts[i]
+
+    which = which_run[run_ids]
+    return (which,
+            [i for i in range(n_runs) if which_run[i] == 2],
+            [i for i in range(n_runs) if which_run[i] == 1])
 
 
 def main(argv=None) -> int:
@@ -140,6 +180,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=os.path.join("ml_model", "dataset_iovnbd.pt"))
     ap.add_argument("--frame", choices=("vehicle", "earth"), default="vehicle")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--fixed-test", default="",
+                    help="comma-separated run names pinned to the test split")
     args = ap.parse_args(argv)
 
     X, Y, R, names = build(args.npz, args.frame)
@@ -147,7 +189,8 @@ def main(argv=None) -> int:
         print("no windows built")
         return 1
     n_runs = len(names)
-    which, test_runs, val_runs = split_by_run(R, n_runs, args.seed)
+    fixed = {x.strip() for x in args.fixed_test.split(",") if x.strip()}
+    which, test_runs, val_runs = split_by_run(R, n_runs, args.seed, names, fixed)
 
     print(f"frame        : {args.frame}")
     print(f"windows      : {len(X):,}  shape {tuple(X.shape[1:])}")
