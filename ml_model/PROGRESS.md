@@ -4,7 +4,118 @@ Running record of what has been tried, what it measured, and what is queued. Kep
 that a session which is interrupted — context exhausted, usage limit, machine restart —
 can be resumed without re-deriving anything. Newest state at the top of each section.
 
-## Fixed yardstick
+## 2026-09-05: TCN replaces ResNet1D, and the yaw head is retired
+
+Three results, in descending order of how much they matter.
+
+### 1. Do not integrate the model's yaw head. Use the debiased gyro.
+
+Free-running drift on the held-out test runs, `model_tcn_base_fx`:
+
+| heading source | 60 s | 300 s |
+|---|---|---|
+| model yaw head | 47.19% | 51.83% |
+| **debiased gyro** | **17.72%** | **19.33%** |
+
+Across four checkpoints (3 seeds + the physics variant) the gyro heading is not just
+better, it is *stable*, which the yaw head is not:
+
+| checkpoint | free-run 60 s (own yaw) | shippable 60 s | shippable 300 s |
+|---|---|---|---|
+| seed 0 | 47.19% | 17.72% | 19.33% |
+| seed 1 | 86.87% | 18.54% | 19.15% |
+| seed 2 | 54.28% | 17.04% | 19.47% |
+| physics 0.3 | 63.90% | 18.38% | 19.07% |
+| **spread** | **47-87%** | **17.0-18.5%** | **19.1-19.5%** (sd 0.17) |
+
+Integrating the yaw head makes drift a lottery over the seed; integrating the gyro
+makes it a constant. Note also that seed 1 has the BEST test RMSE (3.875) and the
+WORST free run (86.87%) - the RMSE/drift divergence this log already warned about,
+now with a 2x example.
+
+A 63% cut for no retraining — it is an inference-time choice. At 17.72% the free run
+now equals the speed-only bound (17.37%), so **heading has stopped being the binding
+constraint and speed is again the thing to improve.**
+
+Why the head cannot win: the gyro channel it is trained from correlates 0.943 with
+truth yaw rate at a bias of -0.03 deg/s, against the head's 0.746-0.822. A learned
+approximation to a signal cannot beat the signal. Keep the head as an auxiliary
+training target only. `eval/model_dr_eval.py` now carries a `gyro` heading source so
+this stays measured rather than remembered.
+
+### 2. The TCN is a straight win over ResNet1D, on the same yardstick
+
+Identical test split (S2_r1 + S3c, 2,577 windows, constant 6.848):
+
+| | ResNet1D (4 seeds) | TCN `tcn_base` (3 seeds) |
+|---|---|---|
+| test speed RMSE | 4.919 +/- 0.046 | **4.078 +/- 0.185** (-17.1%) |
+| best seed | — | 3.875 |
+| vs constant | +28.2% | **+40.4%** |
+| train -> test gap | **12.3x** | **1.7x** |
+| parameters | 3,848,196 | **152,966** |
+| exported asset | 15 MB | **0.7 MB** |
+
+The 12.3x overfitting gap that this log called "the central finding" is gone. That
+finding is now closed: it was an artefact of 778 parameters per training example, and a
+dilated TCN at 4% of the capacity does not have it. `resnet1d.py` and the ResNet-only
+`train.py` are deleted; git history retains both, and every `model_data*.pth` /
+`model_cen*` / `model_kin*` checkpoint is historical and no longer loadable.
+
+### 3. The NHC penalty is an L2 penalty on speed, not a constraint
+
+`nhc_penalty` evaluates to `w * mu^2 * mean_T(sin^2(psi_drift))`, and psi comes from the
+gyro, which is an **input**. The only gradient path that reduces it is shrinking `mu`.
+
+Ablation on the fixed split, one seed each:
+
+| variant | test RMSE | vs const | bias | shrink | sigma |
+|---|---|---|---|---|---|
+| `tcn_base` (all aux 0) | **4.236** | +38.1% | -0.454 | 0.699 | 1.89 |
+| `+ w_physics 0.3` | 4.111 | +40.0% | — | 0.686 | — |
+| `+ gain removed` | 4.376 | +36.1% | -0.764 | 0.696 | 1.79 |
+| `w_nhc = 0.05` | 4.304 | +37.1% | -0.827 | 0.755 | 3.20 |
+| `w_nhc = 0.2 + phys 0.3 + smooth 0.1` | **7.838** | **-14.5%** | **-5.427** | **0.311** | 4.92 |
+
+`w_physics = 0.3` lands at 4.111, inside the base's seed spread [3.875, 4.236], so the
+physics term is **neutral**: `v_seq`/`a_seq` are separate heads nothing reads at
+inference, so it is an auxiliary task rather than a constraint on the deliverable.
+
+Raising `w_nhc` 0.05 -> 0.2 costs **+85% test RMSE**. Solving the NLL/NHC stationarity
+condition at the model's own sigma^2 = 28.8 predicts `mu = 0.424 x truth`; measured
+0.343. At 0.05 it is harmless and mildly improves shrinkage; at 0.2 it dominates the
+loss. `losses.py` pre-registered this outcome and it came true.
+
+### Established, do not re-litigate (2026-09-05 additions)
+
+- **Debiasing did not cost the model gravity.** The up-channel per-run bias spread is
+  0.007 m/s^2, 1.2% of that channel's sd, and per-channel standardisation removes the
+  constant 9.81 in every configuration. The hypothesis is refuted, not untested.
+- **Keep `--debias all`.** Per-run spread as a fraction of channel sd: acc_fwd 15.5%,
+  acc_right 12.1%, gyro channels 1.3-2.9%. The accelerometer half carries the larger
+  correction and fixes the opposite-sign speed bias; the gyro half is small per sample
+  but *integrates* (0.004 rad/s ~ 825 deg/hr) and is what makes result 1 work.
+  `--debias gyro` now exists but discards the larger half.
+- **`gain` augmentation helps.** Removing it measured 3.3% worse (4.236 -> 4.376), so
+  the "amplitude is the speed cue" argument does not survive contact with the data.
+- **The `smoothness` term is broken as wired.** Its docstring requires batches in
+  session/time order; `train_iovnbd.py` shuffles with `randperm`. 20% of adjacent pairs
+  are same-run *random* windows, making it a second shrinkage-toward-run-mean term.
+  Either sort batches or leave `w_smooth = 0`.
+- **Pin the split.** A rebuild without `--fixed-test S2_r1,S3c` silently moved the test
+  set to M + S4_r1, making every number incomparable to this log. Always pass it.
+
+### The gap that caps all of this: train/serve skew
+
+Nothing above reaches the phone yet. `IMUModelRunner` feeds **earth-frame** levelled
+acceleration plus **raw device gyro** with **no bias removal**; the checkpoints are
+trained on **vehicle-frame** (forward, right, up) features with the per-run stationary
+bias subtracted. Measured consequence, on our own Kharagpur recording: every checkpoint
+scores worse than predicting a constant, and the shipped asset is worse than a constant
+by 208%. `ml_model/export_model.py` now refuses a vehicle-frame export unless
+overridden. `dataset_earth.pt` is built and ready to train the matching framing.
+
+## Fixed yardstick (unchanged)
 
 All speed numbers below are **test speed RMSE in m/s** on the SAME held-out set:
 runs `S2_r1` + `S3c`, 2,577 windows, never trained on. `--fixed-test S2_r1,S3c` pins

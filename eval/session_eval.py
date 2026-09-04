@@ -310,27 +310,20 @@ def show(s):
 # ------------------------------------------------------------------------ inference
 
 def load_model(path):
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ml_model"))
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ml_model"))
     import torch
-    from resnet1d import ResNet1D
-    from .rank_models import infer_shape
+    from tcn_model import TCNModel
+    from export_model import infer_geometry
 
     state = torch.load(path, map_location="cpu", weights_only=True)
     if "model" in state and isinstance(state["model"], dict):
         state = state["model"]
-    widths, blocks = infer_shape(state)
-    kw = {}
-    if widths:
-        kw["widths"] = widths
-    if blocks:
-        kw["blocks"] = blocks
-    try:
-        net = ResNet1D(**kw)
-        net.load_state_dict(state)
-    except TypeError:
-        net = ResNet1D()
-        net.load_state_dict(state)
+    geom = infer_geometry(state)
+    if geom is None:
+        raise ValueError(f"{path} is not a TCN checkpoint (no blocks.* tensors)")
+    stem, channels, dilations = geom
+    net = TCNModel(stem_width=stem, channels=channels, dilations=dilations)
+    net.load_state_dict(state)
     net.eval()
     return net
 

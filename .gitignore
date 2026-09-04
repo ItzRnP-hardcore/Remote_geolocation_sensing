@@ -34,6 +34,13 @@ ml_model/dataset_iovnbd*_meta.json
 ml_model/model_data*.pth
 ml_model/model_kin*.pth
 ml_model/model_cen*.pth
+
+# TCN sweep artefacts. The one checkpoint worth tracking is the current best, which is
+# committed explicitly by name (see the negation below) because it is what
+# ml_model/export_model.py turns into the shipped asset; everything else here is an
+# ablation that build_dataset + train_iovnbd reproduce from the zips in dataset/.
+ml_model/model_tcn_*.pth
+!ml_model/model_tcn_base_fx.pth
 ml_model/train_sweep.log
 ml_model/train_iovnbd_results_s*.json
 ml_model/seed*.log

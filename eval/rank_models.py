@@ -1,4 +1,4 @@
-"""Rank trained checkpoints by free-running drift, not by test RMSE.
+"""Rank trained TCN checkpoints by free-running drift, not by test RMSE.
 
 Test RMSE is the training objective, not the deliverable. What the project needs is
 position after a GNSS outage, and the two come apart: a model with slightly worse RMSE
@@ -29,7 +29,8 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ml_model"))
-from resnet1d import ResNet1D  # noqa: E402
+from tcn_model import TCNModel  # noqa: E402
+from export_model import infer_geometry  # noqa: E402
 
 from .model_dr_eval import (DT, load_runs, predict, truth_en, windows_of,
                             yaw_sign_convention)
@@ -38,25 +39,6 @@ CAL_S = 120.0          # seconds of pre-outage GNSS used for bias and calibratio
 DURATIONS = (30, 60, 120, 300)
 
 
-def infer_shape(state):
-    """Recover widths and block count from a checkpoint, so a model loads itself.
-
-    The sweep produced checkpoints at several capacities and nothing records which is
-    which outside the filename. Reading it from the tensor shapes means a checkpoint
-    can always be loaded, whatever it was called.
-    """
-    widths = []
-    i = 0
-    while True:
-        key = f"stages.{i}.0.conv1.weight"
-        if key not in state:
-            break
-        widths.append(state[key].shape[0])
-        i += 1
-    blocks = 0
-    while f"stages.0.{blocks}.conv1.weight" in state:
-        blocks += 1
-    return tuple(widths), max(blocks, 1)
 
 
 def drift_for(model, norm_mean, norm_sd, runs, calibrate=True):
@@ -148,8 +130,12 @@ def main(argv=None) -> int:
         rmse = next((r["test"]["speed_rmse"] for r in res["results"]), float("nan"))
 
         state = torch.load(p, weights_only=True)
-        widths, blocks = infer_shape(state)
-        model = ResNet1D(widths=widths, blocks_per_stage=blocks)
+        geom = infer_geometry(state)
+        if geom is None:
+            print(f"{tag:<26}  (not a TCN checkpoint, skipped)")
+            continue
+        stem, channels, dilations = geom
+        model = TCNModel(stem_width=stem, channels=channels, dilations=dilations)
         model.load_state_dict(state)
         n_par = sum(q.numel() for q in model.parameters())
 

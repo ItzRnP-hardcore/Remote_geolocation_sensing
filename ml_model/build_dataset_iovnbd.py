@@ -22,7 +22,8 @@ Two feature framings are offered because the better one is an open question wort
 measuring rather than asserting:
 
   earth    levelled acceleration + gyro in the world frame, which is what
-           resnet1d.py documents and what the current export expects.
+           IMUModelRunner actually feeds on the phone, so it is the only framing
+           a checkpoint can be exported into without a train/serve skew.
   vehicle  acceleration and gyro resolved into (forward, right, up) using the
            per-session mounting rotation. Speed is then a scalar along one axis,
            which is the framing the reference work relies on, and it makes the
@@ -42,7 +43,7 @@ import os
 import numpy as np
 import torch
 
-WINDOW = 100          # 10 s at 10 Hz, matching resnet1d.WINDOW_SAMPLES
+WINDOW = 100          # 10 s at 10 Hz, matching tcn_model.WINDOW_SAMPLES
 STRIDE = 50           # 50% overlap, as in build_dataset.py
 STATIONARY_MS = 0.5   # same threshold build_dataset.py uses
 
@@ -142,6 +143,14 @@ def build(npz_path: str, frame: str, debias: str = "none"):
                 # The gyro bias is handled in the navigation path already, so this
                 # ablation isolates whether the accelerometer offset is the culprit.
                 bias = np.concatenate([bias[:3], np.zeros(3)])
+            elif debias == "gyro":
+                # The mirror ablation: gyro offset only, accelerometer untouched. The
+                # accelerometer's stationary mean is dominated by gravity on the vertical
+                # channel (measured 9.849 +/- 0.007 across runs), and per-channel
+                # standardisation already removes a constant that size, so this mode
+                # changes far less than its name suggests - the per-run SPREAD it leaves
+                # in place is 1% of one channel's standard deviation.
+                bias = np.concatenate([np.zeros(3), bias[3:]])
             feats = feats - bias
             biases.append(bias)
         else:
@@ -278,7 +287,7 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--test-driver", default="",
                     help="hold out an entire driver (A, B, D or E) as the test set")
-    ap.add_argument("--debias", choices=("none", "all", "accel"), default="none",
+    ap.add_argument("--debias", choices=("none", "all", "accel", "gyro"), default="none",
                     help="subtract each run's stationary-mean offset")
     ap.add_argument("--fixed-test", default="",
                     help="comma-separated run names pinned to the test split")

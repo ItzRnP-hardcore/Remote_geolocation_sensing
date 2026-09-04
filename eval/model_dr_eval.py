@@ -40,8 +40,8 @@ import sys
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ml_model"))
-from resnet1d import ResNet1D  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ml_model"))
+from tcn_model import TCNModel  # noqa: E402
 
 DT = 0.1
 WINDOW = 100
@@ -152,7 +152,15 @@ def score(run, model_speed, model_yaw, sign, a, b, seg=None):
         e = np.cumsum(sp * np.sin(h)) * DT
         n = np.cumsum(sp * np.cos(h)) * DT
     else:
-        yw = (run["yaw_rate"] if b == "truth" else model_yaw)[sl]
+        if b == "truth":
+            yw = run["yaw_rate"][sl]
+        elif b == "gyro":
+            # The measured alternative to the model's yaw head: channel 5 of the
+            # feature block is the vehicle-frame vertical gyro. On-device this is the
+            # signal the integrator already has, so a win here is free.
+            yw = run["gyro_yaw"][sl]
+        else:
+            yw = model_yaw[sl]
         e, n, hd = integrate(sp, yw, h0, sign)
     # Truth offsets are absolute from run start; re-base both to the window start.
     te = te - te[0]
@@ -223,8 +231,14 @@ def main(argv=None) -> int:
     split = d["split"].numpy()
     run_ids = d["run_ids"].numpy()
     test_names = {names[i] for i in np.unique(run_ids[split == 2])}
+    
+    bias_map = {}
+    if "run_bias" in d:
+        biases = d["run_bias"].numpy()
+        for i, name in enumerate(names):
+            bias_map[name] = biases[i]
 
-    model = ResNet1D()
+    model = TCNModel()
     model.load_state_dict(torch.load(args.model, weights_only=True))
 
     wanted = ({x.strip() for x in args.runs.split(",") if x.strip()}
@@ -238,17 +252,26 @@ def main(argv=None) -> int:
 
     durations = [int(x) for x in args.durations.split(",")]
     combos = [("truth", "heading"), ("truth", "truth"), ("model", "truth"),
-              ("truth", "model"), ("model", "model")]
+              ("truth", "model"), ("truth", "gyro"), ("model", "model"),
+              ("model", "gyro")]
     labels = {("truth", "heading"): "truth speed + truth heading (integrator check)",
               ("truth", "truth"): "truth speed + integrated truth yaw",
               ("model", "truth"): "model speed + truth yaw  (speed error alone)",
               ("truth", "model"): "truth speed + model yaw  (yaw error alone)",
-              ("model", "model"): "model speed + model yaw  (free-running)"}
+              ("truth", "gyro"): "truth speed + DEBIASED GYRO yaw",
+              ("model", "model"): "model speed + model yaw  (free-running)",
+              ("model", "gyro"): "model speed + DEBIASED GYRO yaw  (SHIPPABLE)"}
 
     agg = {c: {t: [] for t in durations} for c in combos}
     for run in runs:
         sign = yaw_sign_convention(run)
-        sp, yw = predict(model, run["feat"], norm_mean, norm_sd)
+        
+        feat = run["feat"]
+        if run["name"] in bias_map:
+            feat = feat - bias_map[run["name"]]
+            
+        run["gyro_yaw"] = feat[:, 5]
+        sp, yw = predict(model, feat, norm_mean, norm_sd)
         if sp is None:
             continue
         ch = analyse_channels(run, sp, yw, sign)
