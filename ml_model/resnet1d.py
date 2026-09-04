@@ -65,7 +65,7 @@ class ResNet1D(nn.Module):
 
     def __init__(self, in_channels: int = IN_CHANNELS,
                  widths: tuple[int, ...] = (64, 128, 256, 512),
-                 blocks_per_stage: int = 2):
+                 blocks_per_stage: int = 2, dropout: float = 0.0):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv1d(in_channels, widths[0], kernel_size=7, stride=2,
@@ -84,6 +84,11 @@ class ResNet1D(nn.Module):
             in_ch = width
         self.stages = nn.Sequential(*stages)
         self.pool = nn.AdaptiveAvgPool1d(1)
+
+        # Dropout on the pooled feature, off by default so existing checkpoints load
+        # unchanged. Worth having because this network is heavily over-parameterised
+        # for the data: 3.85M parameters against 8,804 training windows.
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         feat = widths[-1]
         # Displacement is non-negative, so mu comes through softplus rather
@@ -106,7 +111,7 @@ class ResNet1D(nn.Module):
         if x.dim() != 3 or x.shape[1] != IN_CHANNELS:
             raise ValueError(
                 f"expected (B, {IN_CHANNELS}, T), got {tuple(x.shape)}")
-        h = self.pool(self.stages(self.stem(x))).flatten(1)
+        h = self.dropout(self.pool(self.stages(self.stem(x))).flatten(1))
         logvar = self.head_logvar(h).squeeze(-1).clamp(LOGVAR_MIN, LOGVAR_MAX)
         return {
             "mu": self.softplus(self.head_mu(h)).squeeze(-1),

@@ -119,7 +119,8 @@ def evaluate(model, Xs, Xr, Y, mean_speed, batch=256):
     }
 
 
-def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir, tag=""):
+def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
+                  tag="", widths=(64, 128, 256, 512), blocks=2, dropout=0.0):
     Xs_tr, Xr_tr, Y_tr, nxt_tr = data["train"]
     Xs_va, Xr_va, Y_va, _ = data["val"]
     Xs_te, Xr_te, Y_te, _ = data["test"]
@@ -127,7 +128,8 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
 
     torch.manual_seed(seed)
     np.random.seed(seed)
-    model = ResNet1D()
+    model = ResNet1D(widths=tuple(widths), blocks_per_stage=blocks,
+                     dropout=dropout)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
@@ -194,6 +196,10 @@ def main(argv=None) -> int:
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--widths", default="64,128,256,512",
+                    help="channel widths per stage; shrink to cut capacity")
+    ap.add_argument("--blocks", type=int, default=2)
+    ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--w-kin", type=float, default=0.05)
     ap.add_argument("--w-cen", type=float, default=0.05)
     ap.add_argument("--out", default="ml_model")
@@ -253,8 +259,10 @@ def main(argv=None) -> int:
     results = []
     for name, wk, wc in variants:
         print(f"--- {name} (w_kin={wk}, w_cen={wc}) ---")
+        widths = tuple(int(x) for x in args.widths.split(","))
         results.append(train_variant(name, wk, wc, packs, args.epochs, args.lr,
-                                     args.seed, args.out, args.tag))
+                                     args.seed, args.out, args.tag, widths,
+                                     args.blocks, args.dropout))
         print()
 
     print(f"{'variant':<14}{'val RMSE':>10}{'test RMSE':>11}{'const':>9}"
