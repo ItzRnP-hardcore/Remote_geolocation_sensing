@@ -37,3 +37,12 @@ ml_model/model_cen*.pth
 ml_model/train_sweep.log
 ml_model/train_iovnbd_results_s*.json
 ml_model/seed*.log
+
+# Sweep artefacts: derived datasets (~34 MB each), per-config logs and result files.
+# All regenerable from dataset/IO-VNBD_original via eval/iovnbd.py and
+# ml_model/build_dataset_iovnbd.py. Patterns deliberately require the underscore so
+# they do not match the tracked ml_model/dataset.pt.
+ml_model/dataset_*.pt
+ml_model/dataset_*_meta.json
+ml_model/*.log
+ml_model/train_iovnbd_results_*.json
