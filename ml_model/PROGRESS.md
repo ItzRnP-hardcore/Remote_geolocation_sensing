@@ -22,7 +22,7 @@ Reference points on that set:
 | 1 | baseline, data loss only | 12.9 h, 10 runs, 4,949 train windows | 0,1,2,3 | **4.919** ± 0.046 | — |
 | 2 | + centripetal loss `a_lat = v·ω`, w=0.01 | same | 0,1,2,3 | 4.852 ± 0.068 | −1.35%, sign consistent 4/4, paired t = −2.83 on 3 df — suggestive, not significant |
 | 3 | + kinematic loss `v_t = v_{t-1} + a·dt` | same | 0 | 4.969 / 5.063 / 6.030 at w = 0.01 / 0.05 / 0.2 | **hurts monotonically**; refutes the execution plan's constraint |
-| 4 | 2× data (yaw gate relaxed) | 19.9 h, 26 runs, 8,804 train windows | 0,1,2 | *running* | — |
+| 4 | 2x data (yaw gate relaxed) | 19.9 h, 26 runs, 8,804 train windows | 0,1,2 | **5.30 / 5.31 / 5.45** | **+8.7% WORSE** |
 
 ## The central finding (2026-09-04)
 
