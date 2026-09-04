@@ -70,7 +70,39 @@ def earth_frame(accel, quat):
     ], axis=1)
 
 
-def build(npz_path: str, frame: str):
+def stationary_bias(feats, speed, n_channels=6):
+    """Per-run DC offset, measured while the vehicle is stopped.
+
+    The standardisation in train_iovnbd.py is global: one mean and standard deviation
+    per channel over the whole training split. A run whose accelerometer sits at a
+    different DC level - different mounting tilt, different handset, different
+    temperature - is therefore presented to the network shifted, and a softplus speed
+    head can absorb that shift as a constant speed offset of either sign. That is
+    exactly the observed failure: +1.45 m/s bias on one test run, -3.49 on the other.
+
+    The same fix has already been shown to work on the sibling signal in this project.
+    Removing the gyroscope's per-run bias from pre-outage data cut 300 s heading drift
+    from 46% to 24%; the accelerometer channels had simply never had the equivalent.
+
+    Estimated from stationary samples rather than the whole run, because the mean over
+    a whole run also contains its speed profile, and subtracting that would remove
+    signal along with offset. On-device the same estimate comes from the vehicle's own
+    stops, so this is deployable rather than an oracle.
+
+    Note what this removes on the vertical channel: in the vehicle frame it still
+    carries gravity, so the stationary mean is about 9.81 there, plus whatever tilt
+    leakage sits on forward and lateral. The leakage is the per-session term worth
+    removing; the constant gravity was already being absorbed by standardisation.
+    """
+    stat = np.asarray(speed) < STATIONARY_MS
+    if stat.sum() >= 100:
+        return feats[stat].mean(axis=0)
+    # Too few stops to measure it. The median over the run is a poor substitute for a
+    # stationary mean but is far more robust than the mean to the speed profile.
+    return np.median(feats, axis=0)
+
+
+def build(npz_path: str, frame: str, debias: str = "none"):
     d = np.load(npz_path, allow_pickle=True)
     starts = d["run_starts"]
     lengths = d["run_lengths"]
@@ -88,7 +120,7 @@ def build(npz_path: str, frame: str):
     yaw_all = d["truth_yaw_rate"]
     lat_acc_all = d["truth_lat_acc"]
 
-    windows, targets, run_ids = [], [], []
+    windows, targets, run_ids, biases = [], [], [], []
     for ri, (s0, n) in enumerate(zip(starts, lengths)):
         a = acc_all[s0:s0 + n]
         g = gyr_all[s0:s0 + n]
@@ -96,6 +128,17 @@ def build(npz_path: str, frame: str):
         yr = yaw_all[s0:s0 + n]
         la = lat_acc_all[s0:s0 + n]
         feats = np.concatenate([a, g], axis=1)          # (n, 6)
+
+        if debias != "none":
+            bias = stationary_bias(feats, sp)
+            if debias == "accel":
+                # The gyro bias is handled in the navigation path already, so this
+                # ablation isolates whether the accelerometer offset is the culprit.
+                bias = np.concatenate([bias[:3], np.zeros(3)])
+            feats = feats - bias
+            biases.append(bias)
+        else:
+            biases.append(np.zeros(feats.shape[1]))
 
         # A window may not straddle a run boundary: the slice above already
         # guarantees that, since each run is indexed independently.
@@ -117,7 +160,7 @@ def build(npz_path: str, frame: str):
     X = np.asarray(windows, dtype=np.float32)
     Y = np.asarray(targets, dtype=np.float32)
     R = np.asarray(run_ids, dtype=np.int64)
-    return X, Y, R, names
+    return X, Y, R, names, np.asarray(biases)
 
 
 def split_by_run(run_ids, n_runs, seed: int = 0, names=None, fixed_test=()):
@@ -180,11 +223,13 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=os.path.join("ml_model", "dataset_iovnbd.pt"))
     ap.add_argument("--frame", choices=("vehicle", "earth"), default="vehicle")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--debias", choices=("none", "all", "accel"), default="none",
+                    help="subtract each run's stationary-mean offset")
     ap.add_argument("--fixed-test", default="",
                     help="comma-separated run names pinned to the test split")
     args = ap.parse_args(argv)
 
-    X, Y, R, names = build(args.npz, args.frame)
+    X, Y, R, names, biases = build(args.npz, args.frame, args.debias)
     if not len(X):
         print("no windows built")
         return 1
@@ -192,7 +237,7 @@ def main(argv=None) -> int:
     fixed = {x.strip() for x in args.fixed_test.split(",") if x.strip()}
     which, test_runs, val_runs = split_by_run(R, n_runs, args.seed, names, fixed)
 
-    print(f"frame        : {args.frame}")
+    print(f"frame        : {args.frame}   debias: {args.debias}")
     print(f"windows      : {len(X):,}  shape {tuple(X.shape[1:])}")
     print(f"runs         : {n_runs}")
     print(f"  train {int((which == 0).sum()):>6}  val {int((which == 1).sum()):>6}"
@@ -218,6 +263,7 @@ def main(argv=None) -> int:
         "run_ids": torch.tensor(R),
         "split": torch.tensor(which),
         "run_names": names,
+        "run_bias": torch.tensor(biases, dtype=torch.float32),
         "frame": args.frame,
         "target_names": ["speed_mps", "stationary", "yaw_rate_rads", "lateral_acc_ms2"],
     }, args.out)

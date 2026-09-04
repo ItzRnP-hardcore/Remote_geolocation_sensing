@@ -87,6 +87,48 @@ def centripetal_residual(mu, yaw, raw):
     return (raw[:, LAT, -1] - mu * yaw) ** 2
 
 
+def augment(raw, kinds, gen):
+    """Augment a batch of RAW (B, 6, T) vehicle-frame windows.
+
+    Applied to the raw tensor and normalised afterwards, not to the normalised one:
+    the horizontal rotation mixes channels whose normalisation constants differ (gyro
+    forward and right have standard deviations 0.104 and 0.079), so rotating after
+    scaling would quietly distort the very geometry the rotation is meant to preserve.
+
+    rot    Random rotation about the vertical axis, mixing the forward and right
+           channels of BOTH accelerometer and gyroscope while leaving the vertical
+           channels alone. This is the augmentation that matters here. The
+           device-to-vehicle mounting angle is estimated per session and estimated
+           badly - the fitted forward axis correlates only ~0.2 with true longitudinal
+           acceleration - so a model trained on one set of mountings has been learning
+           each session's particular error. Forcing invariance to that angle removes a
+           degree of freedom the model was overfitting to, and it costs nothing at
+           inference.
+    gain   Per-window multiplicative jitter, for sensor scale-factor differences
+           between handsets.
+    noise  Additive Gaussian, at a fraction of each channel's own spread.
+    """
+    x = raw
+    if "rot" in kinds:
+        b = x.shape[0]
+        th = torch.rand(b, generator=gen) * (2 * math.pi)
+        c, s_ = torch.cos(th)[:, None], torch.sin(th)[:, None]
+        x = x.clone()
+        for f, r in ((0, 1), (3, 4)):          # accel fwd/right, then gyro fwd/right
+            # Clone before writing: x[:, f, :] is a VIEW, so assigning to it first
+            # would corrupt the value the second line still needs to read.
+            xf, xr = x[:, f, :].clone(), x[:, r, :].clone()
+            x[:, f, :] = c * xf - s_ * xr
+            x[:, r, :] = s_ * xf + c * xr
+    if "gain" in kinds:
+        g = 1.0 + 0.1 * torch.randn(x.shape[0], 1, 1, generator=gen)
+        x = x * g
+    if "noise" in kinds:
+        sd = x.std(dim=(0, 2), keepdim=True)
+        x = x + 0.05 * sd * torch.randn(x.shape, generator=gen)
+    return x
+
+
 def build_pairs(run_ids: np.ndarray) -> np.ndarray:
     """Index of the next window in the same run, or -1 where there is none."""
     nxt = np.full(len(run_ids), -1, dtype=np.int64)
@@ -124,7 +166,7 @@ def evaluate(model, Xs, Xr, Y, mean_speed, batch=256):
 
 def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
                   tag="", widths=(64, 128, 256, 512), blocks=2, dropout=0.0,
-                  weight_decay=0.0):
+                  weight_decay=0.0, augment_kinds=()):
     Xs_tr, Xr_tr, Y_tr, nxt_tr = data["train"]
     Xs_va, Xr_va, Y_va, _ = data["val"]
     Xs_te, Xr_te, Y_te, _ = data["test"]
@@ -140,6 +182,7 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
     n = len(Xs_tr)
+    gen = torch.Generator().manual_seed(seed + 977)
     best = (math.inf, None, -1)
     history = []
     t0 = time.time()
@@ -151,7 +194,12 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
         steps = 0
         for i in range(0, n - 1, 64):
             idx = perm[i:i + 64]
-            xb, yb = Xs_tr[idx], Y_tr[idx]
+            yb = Y_tr[idx]
+            if augment_kinds:
+                raw = augment(Xr_tr[idx], augment_kinds, gen)
+                xb = (raw - data["norm_mean"]) / data["norm_sd"]
+            else:
+                raw, xb = Xr_tr[idx], Xs_tr[idx]
             out = model(xb)
             loss, _, _ = data_loss(out, yb)
 
@@ -167,7 +215,7 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
 
             cen = torch.tensor(0.0)
             if weight_cen > 0:
-                cen = centripetal_residual(out["mu"], out["yaw_rate"], Xr_tr[idx]).mean()
+                cen = centripetal_residual(out["mu"], out["yaw_rate"], raw).mean()
                 loss = loss + weight_cen * cen
 
             opt.zero_grad()
@@ -209,6 +257,8 @@ def main(argv=None) -> int:
     ap.add_argument("--blocks", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--weight-decay", type=float, default=0.0)
+    ap.add_argument("--augment", default="",
+                    help="comma-separated: rot, gain, noise")
     ap.add_argument("--w-kin", type=float, default=0.05)
     ap.add_argument("--w-cen", type=float, default=0.05)
     ap.add_argument("--out", default="ml_model")
@@ -243,6 +293,8 @@ def main(argv=None) -> int:
         nxt = np.where(nxt >= 0, remap[np.clip(nxt, 0, None)], -1)
         packs[key] = (Xs[m], X[m], Y[m], torch.tensor(nxt))
     packs["mean_speed"] = Y[tr][:, 0].mean()
+    packs["norm_mean"] = mu_c
+    packs["norm_sd"] = sd_c
     print(f"train {len(packs['train'][0])}  val {len(packs['val'][0])}  "
           f"test {len(packs['test'][0])}   constant-baseline speed "
           f"{float(packs['mean_speed']):.2f} m/s")
@@ -271,7 +323,9 @@ def main(argv=None) -> int:
         widths = tuple(int(x) for x in args.widths.split(","))
         results.append(train_variant(name, wk, wc, packs, args.epochs, args.lr,
                                      args.seed, args.out, args.tag, widths,
-                                     args.blocks, args.dropout, args.weight_decay))
+                                     args.blocks, args.dropout, args.weight_decay,
+                                     tuple(x.strip() for x in args.augment.split(",")
+                                           if x.strip())))
         print()
 
     print(f"{'variant':<14}{'params':>10}{'train':>8}{'val':>8}{'test':>8}{'gap x':>7}"
