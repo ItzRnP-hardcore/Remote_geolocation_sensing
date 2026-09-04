@@ -48,8 +48,48 @@ long outages - and lose on short ones.
 from -1.410 to -0.403 while barely moving RMSE. For dead reckoning that trade is
 favourable: a bias integrates into displacement while zero-mean scatter partly cancels.
 
-These gaps are a few percent on ONE seed, which is the size that has already misled
-this project once. Three seeds of each are running before any of it is believed.
+### Confirmed over 4 seeds: the gain is BIAS, not RMSE
+
+| config | test RMSE mean | sd | vs base | speed bias | \|bias\| change | t |
+|---|---|---|---|---|---|---|
+| base | 4.919 | 0.046 | — | -1.428 | — | — |
+| **dropout 0.3 + rotation** | 4.800 | 0.119 | -2.4% | **-1.002** | **-0.426** | **-6.72** |
+| quality weight + rotation | 4.811 | 0.247 | -2.2% | -1.119 | -0.309 | -2.85 |
+| rot + gain + noise | 4.831 | 0.233 | -1.8% | -1.145 | -0.283 | -1.44 |
+
+The single-seed 4.3% RMSE gain shrank to 2.4% and is **not** significant (t = -2.61
+against the 3.18 needed at 3 df), and the signs are not consistent across seeds.
+Augmentation also triples the seed variance.
+
+What IS solid is bias: dropout plus rotation cuts speed bias by 0.426 m/s, about 30%,
+same sign on all four seeds, t = -6.72. That is the quantity that matters for dead
+reckoning, because a bias integrates into displacement while zero-mean scatter partly
+cancels.
+
+Free-running drift, 3 seeds each:
+
+| config | 30 s | 60 s | 120 s | 300 s | seed sd at 300 s |
+|---|---|---|---|---|---|
+| base | 16.62 | 17.90 | 17.99 | 21.12 | 0.62 |
+| d3rot | 16.59 | 17.56 | 18.68 | 20.69 | 0.21 |
+| rotgn | 16.91 | 18.27 | 18.47 | 20.51 | 0.96 |
+| wqrot | 16.47 | 18.07 | 18.75 | **20.11** | 0.79 |
+
+Drift gains are 2-5%, which is the same size as the seed spread. **Not conclusive.**
+
+### Where this leaves the model
+
+Everything tried on the training side - more data, less capacity, dropout, weight
+decay, two physics losses, three augmentations, quality weighting - moves test RMSE by
+at most a couple of percent, and only the bias reduction is statistically solid. The
+model is close to what a 10 Hz phone IMU supports for ABSOLUTE speed on this data.
+
+The measured wins remain on the inference side and are an order of magnitude larger:
+heading from the debiased gyro rather than the model (300 s drift 46% to 24%), and
+per-session offset calibration (30 s drift 20.5% to 16.0%).
+
+Recommended default: **dropout 0.3 + rotation augmentation**, for the bias reduction
+rather than for RMSE.
 
 ## The central finding (2026-09-04)
 
