@@ -34,6 +34,17 @@ class DeadReckoner {
         /** How fast the world-frame accelerometer bias is learned during stand-still. */
         const val K_BIAS = 0.02
 
+        /**
+         * How fast the DEVICE-frame gyroscope bias is learned during stand-still.
+         *
+         * Slower than [K_BIAS] because the quantity is smaller and matters more. Measured across
+         * the IO-VNBD runs the per-session gyro offset is only 1.3-2.9% of a channel's spread,
+         * but heading is its integral: 0.004 rad/s is 825 deg/hr, and swapping a model yaw head
+         * for this debiased channel took 300 s free-running drift from 51.8% to 19.3%. A noisy
+         * estimate of a small number would give that back, so it is averaged hard.
+         */
+        const val K_GYRO_BIAS = 0.005
+
         /** Stationarity gates: |‖a‖ − g| and ‖ω‖ must both stay under these. */
         const val STILL_ACCEL_TOL = 0.15
         const val STILL_GYRO_TOL = 0.05
@@ -78,6 +89,21 @@ class DeadReckoner {
     private var bE = 0.0
     private var bN = 0.0
     private var bU = 0.0
+
+    /**
+     * Device-frame gyroscope bias, learned during stand-still.
+     *
+     * Device frame, not world: the offset is a property of the sensor die, so it is fixed in the
+     * handset's own axes and rotating it into ENU first would smear one constant across three
+     * channels as the phone turns.
+     */
+    private var gbX = 0.0
+    private var gbY = 0.0
+    private var gbZ = 0.0
+
+    /** Whether stand-still has been seen for long enough to trust [gyroBias]. */
+    var gyroBiasValid: Boolean = false
+        private set
 
     private var gravity = G_NOMINAL
     private var stillFor = 0.0
@@ -187,6 +213,46 @@ class DeadReckoner {
 
     fun onGyro(x: Float, y: Float, z: Float) {
         lastGyroNorm = sqrt((x * x + y * y + z * z).toDouble())
+        if (isStationary) {
+            // Standing still means the true rate is zero, so whatever the gyro reports is offset.
+            // [isStationary] is maintained on the accelerometer tick; both streams arrive at
+            // 200 Hz, so it is at most one sample stale here, which cannot matter for a term
+            // averaged with a gain of 0.005.
+            gbX += K_GYRO_BIAS * (x - gbX)
+            gbY += K_GYRO_BIAS * (y - gbY)
+            gbZ += K_GYRO_BIAS * (z - gbZ)
+            gyroBiasValid = true
+        }
+    }
+
+    /** Learned gyroscope bias in device axes, rad/s. Zero until a stop has been observed. */
+    val gyroBias: DoubleArray get() = doubleArrayOf(gbX, gbY, gbZ)
+
+    /**
+     * Copy the current device-to-world rotation out, row major. False before the first sample.
+     *
+     * Shared so the model's levelling uses the same attitude the integrator navigates on.
+     * Measured on session 20260904_195146 against GNSS bearing, the rotation vector tracks the
+     * road to 10.8 deg RMS while `getRotationMatrix(gravity, magnetometer)` manages 12.6 - and
+     * the magnetometer is the one sensor a steel vehicle actively disturbs.
+     */
+    fun rotationInto(out: FloatArray): Boolean {
+        if (!haveRotation) return false
+        System.arraycopy(rotation, 0, out, 0, 9)
+        return true
+    }
+
+    /**
+     * Remove the learned offset from one gyroscope sample, in place, in device axes.
+     *
+     * Exposed rather than applied internally because the integrator takes its attitude from the
+     * rotation vector and never integrates this channel itself. The consumer is the model: it is
+     * trained on `--debias all` features, so feeding it the raw channel is a train/serve skew.
+     */
+    fun debiasGyro(out: FloatArray, x: Float, y: Float, z: Float) {
+        out[0] = (x - gbX).toFloat()
+        out[1] = (y - gbY).toFloat()
+        out[2] = (z - gbZ).toFloat()
     }
 
     /**
@@ -326,6 +392,8 @@ class DeadReckoner {
         driftMetres = 0.0
         stillFor = 0.0
         isStationary = false
+        gbX = 0.0; gbY = 0.0; gbZ = 0.0
+        gyroBiasValid = false
         headingCorrectionDeg = 0.0
         modelSpeedCorrectionMps = 0.0
     }

@@ -178,13 +178,28 @@ and wakes the UI collector 200 times a second. Cache into a field, let the 2 s t
 `ml.csv` records what the network predicts, and the UI shows it, but nothing in the navigation path
 acts on it yet. That is deliberate until `mu` has been validated against GNSS ground truth:
 
-- `mu` is trained against `speed_mps`, not displacement, despite the docstring in `resnet1d.py`.
-- `yaw_rate` is trained against a hardcoded `0.0` in `build_dataset.py` and is absent from the loss
-  in `train.py`, so that head carries no signal.
-- The training set is 304 windows with a maximum speed of 7.3 m/s (26 km/h) — no highway data.
-- Training levels acceleration with the fused `linear_accel` stream and the `rv` quaternion; the
-  app levels with `accel - gravity` and a magnetometer-derived rotation matrix. Closing that skew
-  is worth doing before trusting the numbers.
+- `mu` is trained against `speed_mps`, not displacement, despite the docstring in `tcn_model.py`.
+- `yaw_rate` now carries real signal (86.3% non-zero labels), but **must not be integrated**:
+  free-running drift at 300 s is 51.8% using the head against 19.3% using the debiased gyro, and
+  across seeds the head ranges 47-87% while the gyro holds 19.1-19.5%. Keep it as an auxiliary
+  training target only.
+- The training set is now IO-VNBD: 4,765 windows over 10 runs, speeds to 32.4 m/s. It is
+  also a different country, car and handset, which is why `eval/session_eval.py` exists.
+- Levelling skew: **closed.** The app now levels with the same rotation-vector attitude the
+  integrator navigates on, rather than `getRotationMatrix(gravity, magnetometer)`. Measured on
+  session `20260904_195146` against GNSS bearing, the rotation vector tracks the road to 10.8 deg
+  RMS against the magnetometer matrix's 12.6, and it does not depend on the one sensor a steel
+  vehicle disturbs.
+- Gyro bias: **closed.** `DeadReckoner` learns the device-frame gyroscope offset during
+  stand-still and `SensorService` subtracts it before the model sees it, matching the
+  `--debias all` features the checkpoint is trained on. Device frame matters: removing the same
+  offset in the world frame measured *worse* than not removing it at all (43.7 deg RMS against
+  35.9), because the projection depends on how the phone happened to be tilted at each stop.
+  Done correctly it takes integrated heading from 35.9 to 16.1 deg RMS.
+- Frame skew: **still open, and it is the one that blocks shipping.** The checkpoints are trained
+  on vehicle-frame (forward, right, up) features; the app feeds earth frame. `export_model.py`
+  refuses that combination rather than shipping it silently. Either train on `dataset_earth.pt`
+  or estimate the device-to-vehicle rotation on-device.
 
 When it is ready, couple it as a **velocity** update along the current heading, not a position
 offset — see the note where `applyMLCorrection` used to live in `DeadReckoner.kt`.

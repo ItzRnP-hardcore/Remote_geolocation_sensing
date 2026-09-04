@@ -389,6 +389,106 @@ def report_app(sess, grid):
               f"({fr.sum() * DT:.0f} s simulated outage)")
 
 
+def report_heading(sess, grid):
+    """Which heading source actually tracks the road, on this device, in this car.
+
+    The app takes attitude from `SensorManager.getRotationMatrix(gravity, magnetometer)`, which
+    is the most magnetically exposed option available: a vehicle is a steel box full of motors
+    and speakers, and the magnetometer is the one sensor that cares. Three alternatives are on
+    the same recording and cost nothing to compare - the fused rotation vector, the magnetometer
+    free `game_rv`, and integrating the gyro directly.
+
+    Absolute yaw origin differs between them (game_rv and a gyro integral have no north), so
+    every candidate is scored on the CHANGE in heading since the start of the drive against the
+    change in GNSS bearing. That is also the quantity dead reckoning actually consumes.
+    """
+    print("\n=== 4. heading sources, scored against GNSS bearing ===")
+    t, drive = grid["t"], grid["drive"]
+    truth = grid["bearing"]
+    ok = drive & np.isfinite(truth)
+    if ok.sum() < 50:
+        print("  too few GNSS bearings on the driving span")
+        return
+
+    def unwrapped(deg):
+        out = np.full(len(deg), np.nan)
+        m = np.isfinite(deg)
+        out[m] = np.degrees(np.unwrap(np.radians(deg[m])))
+        return out
+
+    tru = unwrapped(truth)
+    cands = {}
+
+    R = grid["R"]
+    if R is not None:
+        # Yaw of the device-to-world matrix: the world-frame direction the device y axis points.
+        cands["rotation vector (rv)"] = np.degrees(np.arctan2(R[:, 0, 1], R[:, 1, 1]))
+
+    imu = sess["imu"]
+    if "game_rv" in imu:
+        t_g, q = imu["game_rv"]
+        Rg = quat_to_matrix(resample(t_g, q[:, :4], t))
+        cands["game_rv (no magnetometer)"] = np.degrees(np.arctan2(Rg[:, 0, 1], Rg[:, 1, 1]))
+
+    if "mag" in imu and R is not None:
+        # What the app does today: tilt from gravity, north from the magnetometer.
+        t_m, mg = imu["mag"]
+        m = resample(t_m, mg[:, :3], t)
+        a = grid["acc"]
+        up = a / np.linalg.norm(a, axis=1, keepdims=True)
+        e = np.cross(m, up); e /= np.linalg.norm(e, axis=1, keepdims=True)
+        n = np.cross(up, e)
+        # Device y axis expressed in (east, north): the same azimuth getOrientation returns.
+        cands["accel+mag (what the app uses)"] = np.degrees(np.arctan2(e[:, 1], n[:, 1]))
+
+    if R is not None:
+        # Vertical component of angular rate in the world frame, integrated. The bias is taken
+        # from the stand-still samples of this session, which is what DeadReckoner now learns.
+        w_up = np.einsum("nij,nj->ni", R, grid["gyro"])[:, 2]
+        # Stand-still must mean the DEVICE is still, not that the vehicle is: this session is
+        # parked from 200 s with the phone being handled, and gating on GNSS speed learns that
+        # handling as "bias" (+1.95 deg/s, which is real rotation). These are DeadReckoner's own
+        # gates, so the number here is the one the app would learn.
+        anorm = np.linalg.norm(grid["acc"], axis=1)
+        gnorm = np.linalg.norm(grid["gyro"], axis=1)
+        still = (np.abs(anorm - 9.80665) < 0.15) & (gnorm < 0.05)
+        # The offset is a property of the sensor die, so it is constant in DEVICE axes and must
+        # be removed there. Averaging the world-frame vertical projection instead gives a number
+        # that depends on how the phone happened to be tilted at each stop, and measurably makes
+        # heading worse (43.7 deg RMS against 35.9 raw). DeadReckoner.onGyro learns it in device
+        # axes for this reason.
+        if still.sum() > 50:
+            bias_dev = np.nanmean(grid["gyro"][still], axis=0)
+        else:
+            bias_dev = np.zeros(3)
+        w_up_db = np.einsum("nij,nj->ni", R, grid["gyro"] - bias_dev)[:, 2]
+        cands["gyro integrated (raw)"] = np.degrees(np.cumsum(w_up) * DT)
+        cands["gyro integrated (debiased)"] = np.degrees(np.cumsum(w_up_db) * DT)
+        print(f"  device-still samples {int(still.sum())} of {len(still)}; device-frame gyro "
+              f"bias {np.degrees(bias_dev[0]):+.3f},{np.degrees(bias_dev[1]):+.3f},"
+              f"{np.degrees(bias_dev[2]):+.3f} deg/s")
+
+    i0 = np.where(ok)[0][0]
+    print(f"\n  {'source':34s}{'sign':>6}{'RMS err':>10}{'final err':>11}{'drift':>12}")
+    for name, h in cands.items():
+        hh = unwrapped(h)
+        m = ok & np.isfinite(hh)
+        if m.sum() < 50:
+            continue
+        # Sign is a property of the recording, not something to assume; both conventions
+        # produce a plausible track and only one matches the road.
+        best = None
+        for sign in (1.0, -1.0):
+            d = sign * (hh - hh[i0]) - (tru - tru[i0])
+            r = float(np.sqrt(np.nanmean(d[m] ** 2)))
+            if best is None or r < best[0]:
+                best = (r, sign, d)
+        rms, sign, d = best
+        span = (t[m][-1] - t[m][0]) / 3600.0
+        print(f"  {name:34s}{sign:>+6.0f}{rms:>9.1f} deg{d[m][-1]:>10.1f} deg"
+              f"{d[m][-1] / max(span, 1e-9):>9.0f} deg/hr")
+
+
 def report_map(sess):
     print("\n=== 3. map matching ===")
     if "mapmatch" not in sess:
@@ -464,6 +564,7 @@ def main(argv=None):
     if args.model:
         frames = ("earth", "vehicle") if args.frame == "both" else (args.frame,)
         report_model(sess, grid, args.model, frames)
+    report_heading(sess, grid)
     report_map(sess)
     return 0
 

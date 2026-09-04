@@ -199,7 +199,6 @@ class SensorService : Service() {
     private lateinit var imuModelRunner: IMUModelRunner
     private val lastAccel = FloatArray(3)
     private val lastGyro = FloatArray(3)
-    private val lastMag = FloatArray(3)
     private val lastGrav = FloatArray(3)
     /** Set on the ML thread once the module is loaded, read on the logger thread every gyro tick. */
     @Volatile private var modelReady = false
@@ -234,7 +233,9 @@ class SensorService : Service() {
      * FloatArray(9) plus a FloatArray(3) at 200 Hz is 600 short-lived objects a second.
      */
     private val rotationMatrix = FloatArray(9)
-    private val inclinationMatrix = FloatArray(9)
+
+    /** Scratch for the debiased gyro handed to the model. Sensor thread only, like [lastGyro]. */
+    private val gyroForModel = FloatArray(3)
     private val orientationAngles = FloatArray(3)
 
     /** Written on the logger thread, read by the periodic publish. */
@@ -559,7 +560,7 @@ class SensorService : Service() {
         mlWriter?.write("t_ns,mu,logvar,stationary_logit,yaw_rate\n")
 
         drWriter = openWriter(dir, "deadreckon.csv")
-        drWriter?.write("t_ns,lat,lon,speed_mps,drift_m,bias_e,bias_n,bias_u,stationary,free_run\n")
+        drWriter?.write("t_ns,lat,lon,speed_mps,drift_m,bias_e,bias_n,bias_u,stationary,free_run,gyro_bias_x,gyro_bias_y,gyro_bias_z,gyro_bias_valid\n")
 
         acquireWakeLock()
         registerSensors()
@@ -884,11 +885,6 @@ class SensorService : Service() {
                     lastGyro[1] = event.values[1]
                     lastGyro[2] = event.values[2]
                 }
-                Sensor.TYPE_MAGNETIC_FIELD -> {
-                    lastMag[0] = event.values[0]
-                    lastMag[1] = event.values[1]
-                    lastMag[2] = event.values[2]
-                }
                 Sensor.TYPE_GRAVITY -> {
                     lastGrav[0] = event.values[0]
                     lastGrav[1] = event.values[1]
@@ -936,7 +932,12 @@ class SensorService : Service() {
             // Levelling for the model runs on the gyro tick because gyro is the fastest stream
             // that also has fresh accelerometer and gravity beside it.
             if (event.sensor.type == Sensor.TYPE_GYROSCOPE) {
-                if (!SensorManager.getRotationMatrix(rotationMatrix, inclinationMatrix, lastGrav, lastMag)) {
+                // The rotation vector, not getRotationMatrix(gravity, magnetometer). Two reasons,
+                // both measured on 20260904_195146: it tracks GNSS bearing better (10.8 deg RMS
+                // against 12.6), and training levels with the rv quaternion, so the magnetometer
+                // matrix was a train/serve skew on top of being the worse estimate. It also drops
+                // the magnetometer dependency, which is exactly the signal a vehicle corrupts.
+                if (!deadReckoner.rotationInto(rotationMatrix)) {
                     return
                 }
                 SensorManager.getOrientation(rotationMatrix, orientationAngles)
@@ -962,9 +963,20 @@ class SensorService : Service() {
                 val earthAccY = rotationMatrix[3] * linAccX + rotationMatrix[4] * linAccY + rotationMatrix[5] * linAccZ
                 val earthAccZ = rotationMatrix[6] * linAccX + rotationMatrix[7] * linAccY + rotationMatrix[8] * linAccZ
 
+                // Debiased, because the checkpoint is trained on features built with
+                // `--debias all`: the per-run stationary offset is subtracted from all six
+                // channels before windowing. Feeding the raw channel here would be a
+                // train/serve skew on exactly the signal that matters most - the gyro offset
+                // is small per sample but heading is its integral, and removing it took
+                // free-running drift from 51.8% to 19.3% on the held-out runs.
+                //
+                // Before the first stop the bias is still zero, which is the honest answer: a
+                // guess would be worse than none, and DeadReckoner.gyroBiasValid records which
+                // regime a session was in.
+                deadReckoner.debiasGyro(gyroForModel, lastGyro[0], lastGyro[1], lastGyro[2])
                 submitToModel(
                     now, earthAccX, earthAccY, earthAccZ,
-                    lastGyro[0], lastGyro[1], lastGyro[2],
+                    gyroForModel[0], gyroForModel[1], gyroForModel[2],
                 )
             }
         }
@@ -1072,6 +1084,7 @@ class SensorService : Service() {
         lastDrSampleNs = tNs
         val p = deadReckoner.position ?: return
         val b = deadReckoner.bias()
+        val g = deadReckoner.gyroBias
         val sb = rowBuilder
         sb.setLength(0)
         sb.append(tNs).append(',')
@@ -1081,7 +1094,9 @@ class SensorService : Service() {
             .append(deadReckoner.driftMetres).append(',')
             .append(b[0]).append(',').append(b[1]).append(',').append(b[2]).append(',')
             .append(if (deadReckoner.isStationary) 1 else 0).append(',')
-            .append(if (freeRunRequested) 1 else 0).append('\n')
+            .append(if (freeRunRequested) 1 else 0).append(',')
+            .append(g[0]).append(',').append(g[1]).append(',').append(g[2]).append(',')
+            .append(if (deadReckoner.gyroBiasValid) 1 else 0).append('\n')
         writeRow(drWriter, sb)
     }
 
