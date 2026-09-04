@@ -8,13 +8,17 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.GnssMeasurementsEvent
+import android.location.GnssNavigationMessage
 import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationManager
@@ -25,6 +29,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
+import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -190,6 +195,32 @@ class SensorService : Service() {
     private var imuWriter: BufferedWriter? = null
     private var gpsWriter: BufferedWriter? = null
     private var gnssWriter: BufferedWriter? = null
+
+    /**
+     * Raw per-satellite observables, one row per satellite per epoch.
+     *
+     * [gnssWriter] records how many satellites the receiver used; this records what each one
+     * actually measured, which is a different kind of data entirely. The reason it exists is
+     * that a position fix needs four satellites for four unknowns, but a *velocity* fix from
+     * Doppler needs only as many as there are unknowns left after the vehicle's own constraints
+     * are applied - a flat road removes vertical velocity, the non-holonomic constraint reduces
+     * velocity to a scalar along the gyro's heading, and coasting the clock drift removes the
+     * last one. In simulation that reaches 0.40 m/s of speed error from a SINGLE satellite,
+     * against the integrator's 1.39. See eval/scarce_gnss.py.
+     *
+     * That result is simulated, and it stays simulated until there is real Doppler on disk.
+     * This is the file that makes validating it possible.
+     */
+    private var gnssRawWriter: BufferedWriter? = null
+
+    /** Broadcast navigation messages, so satellite positions can be reconstructed offline. */
+    private var gnssNavWriter: BufferedWriter? = null
+
+    /** Whether the chipset accepted each raw-GNSS registration. Recorded in session.json. */
+    private var gnssRawSupported = false
+    private var gnssNavSupported = false
+    private var gnssRawRows = 0L
+    private var gnssNavRows = 0L
 
     private var sessionDir: File? = null
     private var sessionId: String = ""
@@ -452,11 +483,15 @@ class SensorService : Service() {
         // Unregister first so nothing new is queued, then let the logger thread drain what is
         // already queued before the files are closed.
         sensorManager.unregisterListener(sensorListener)
-        fusedLocationClient.removeLocationUpdates(locationCallback)
-        try {
-            locationManager.unregisterGnssStatusCallback(gnssCallback)
-        } catch (e: Exception) {
-            Log.w(TAG, "GNSS callback was not registered", e)
+        teardownLocation()
+        locationSubscribed = false
+        if (providerWatcherRegistered) {
+            try {
+                unregisterReceiver(providerWatcher)
+            } catch (e: Exception) {
+                Log.w(TAG, "Provider watcher was not registered", e)
+            }
+            providerWatcherRegistered = false
         }
 
         matchHandler.removeCallbacksAndMessages(null)
@@ -550,6 +585,21 @@ class SensorService : Service() {
         gnssWriter = openWriter(dir, "gnss_status.csv")
         gnssWriter?.write("t_ns,sats_visible,sats_used,mean_cn0_used_dbhz,max_cn0_dbhz\n")
 
+        // The clock fields repeat on every row rather than living in a sidecar. They are
+        // per-epoch, not per-satellite, so this is redundant - but a pseudorange rate is
+        // meaningless without the clock drift it was measured against, and one self-contained
+        // row per observable is far harder to mis-join later than two files and a timestamp.
+        gnssRawWriter = openWriter(dir, "gnss_raw.csv")
+        gnssRawWriter?.write(
+            "t_ns,clock_time_ns,full_bias_ns,bias_ns,drift_nsps,drift_unc_nsps," +
+                "hw_clock_discontinuity,leap_second," +
+                "svid,constellation,state,received_sv_time_ns,received_sv_time_unc_ns," +
+                "cn0_dbhz,pr_rate_mps,pr_rate_unc_mps," +
+                "adr_m,adr_unc_m,adr_state,carrier_freq_hz,multipath\n")
+
+        gnssNavWriter = openWriter(dir, "gnss_nav.csv")
+        gnssNavWriter?.write("t_ns,type,svid,message_id,submessage_id,status,data_base64\n")
+
         matchWriter = openWriter(dir, "mapmatch.csv")
         matchWriter?.write(
             "t_ns,dr_lat,dr_lon,snap_lat,snap_lon,correction_m,road_class,confidence," +
@@ -564,8 +614,8 @@ class SensorService : Service() {
 
         acquireWakeLock()
         registerSensors()
-        requestLocation()
-        registerGnssStatus()
+        registerProviderWatcher()
+        ensureLocationSubscribed()
         writeSessionMetadata(dir)
 
         loggerHandler.post(periodicTask)
@@ -704,7 +754,8 @@ class SensorService : Service() {
     /** Runs on the logger thread during shutdown. */
     private fun closeSession() {
         sessionDir?.let { writeSessionMetadata(it, finished = true) }
-        for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, drWriter, mlWriter, matchWriter)) {
+        for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, gnssRawWriter,
+                                gnssNavWriter, drWriter, mlWriter, matchWriter)) {
             try {
                 w.flush()
                 w.close()
@@ -715,6 +766,8 @@ class SensorService : Service() {
         imuWriter = null
         gpsWriter = null
         gnssWriter = null
+        gnssRawWriter = null
+        gnssNavWriter = null
         drWriter = null
         mlWriter = null
         matchWriter = null
@@ -733,6 +786,11 @@ class SensorService : Service() {
                 imuWriter?.flush()
                 gpsWriter?.flush()
                 gnssWriter?.flush()
+                gnssRawWriter?.flush()
+                gnssNavWriter?.flush()
+                // Cheap, and the reason a session started with Location off recovers
+                // even when the PROVIDERS_CHANGED broadcast never arrives.
+                ensureLocationSubscribed()
                 drWriter?.flush()
                 mlWriter?.flush()
                 matchWriter?.flush()
@@ -997,13 +1055,112 @@ class SensorService : Service() {
 
     // ------------------------------------------------------------------ location
 
+    /**
+     * Whether the location subscriptions are currently live.
+     *
+     * Subscribing is not a one-off. Starting a session with Location switched off used to leave
+     * the recording permanently blind: `registerGnssStatusCallback` returns false, the raw
+     * callbacks refuse, and the fused client has nothing to deliver — and none of it was ever
+     * retried, so turning Location on ten seconds later produced no fixes for the rest of the
+     * drive. This flag plus [ensureLocationSubscribed] makes subscription a state to be
+     * maintained rather than an event that happened once.
+     */
+    private var locationSubscribed = false
+
+    /** True while the OS reports at least one usable location provider. */
+    private fun locationEnabled(): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            locationManager.isLocationEnabled
+        } else {
+            locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not read location state", e)
+        false
+    }
+
+    /**
+     * Bring the location subscriptions into line with whether Location is switched on.
+     *
+     * Idempotent and cheap, so it can be called from the settings broadcast AND from the two
+     * second flush tick. Both, deliberately: the broadcast is the responsive path, but several
+     * OEM builds — Samsung among them — throttle or drop implicit broadcasts to background
+     * processes, and a recording that silently never recovers is exactly the failure this is
+     * fixing. The poll costs one boolean read per two seconds and cannot be throttled away.
+     */
     @SuppressLint("MissingPermission") // guarded by hasLocationPermission() before the session starts
-    private fun requestLocation() {
+    private fun ensureLocationSubscribed() {
+        if (!sessionActive) return
+        if (!locationEnabled()) {
+            // Drop the subscriptions rather than leaving stale ones attached, so that when
+            // Location comes back the re-subscribe below runs from a known state.
+            if (locationSubscribed) {
+                Log.i(TAG, "Location switched off; releasing subscriptions")
+                teardownLocation()
+                locationSubscribed = false
+            }
+            return
+        }
+        if (locationSubscribed) return
+        if (!hasLocationPermission()) return
+
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1_000)
             .setMinUpdateIntervalMillis(500)
             .setWaitForAccurateLocation(false)
             .build()
         fusedLocationClient.requestLocationUpdates(request, locationCallback, loggerThread.looper)
+        registerGnssStatus()
+        locationSubscribed = true
+        locationResubscribes++
+        Log.i(TAG, "Location subscriptions live (attempt $locationResubscribes)")
+    }
+
+    /** Release every location subscription. Safe to call when nothing is registered. */
+    private fun teardownLocation() {
+        fusedLocationClient.removeLocationUpdates(locationCallback)
+        for (unregister in listOf<() -> Unit>(
+            { locationManager.unregisterGnssStatusCallback(gnssCallback) },
+            { locationManager.unregisterGnssMeasurementsCallback(measurementsCallback) },
+            { locationManager.unregisterGnssNavigationMessageCallback(navMessageCallback) },
+        )) {
+            try {
+                unregister()
+            } catch (e: Exception) {
+                Log.w(TAG, "Location callback was not registered", e)
+            }
+        }
+    }
+
+    /**
+     * Watches the system Location toggle so a session started with it off recovers immediately.
+     *
+     * PROVIDERS_CHANGED is sent when the master switch or an individual provider changes. It is
+     * the fast path; [ensureLocationSubscribed] is also polled, because this broadcast is not
+     * reliably delivered on every OEM build.
+     */
+    private fun registerProviderWatcher() {
+        if (providerWatcherRegistered) return
+        val filter = IntentFilter(LocationManager.PROVIDERS_CHANGED_ACTION).apply {
+            addAction(LocationManager.MODE_CHANGED_ACTION)
+        }
+        ContextCompat.registerReceiver(
+            this, providerWatcher, filter, ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        providerWatcherRegistered = true
+    }
+
+    private var providerWatcherRegistered = false
+
+    /** Counts successful (re)subscriptions, so session.json shows whether recovery happened. */
+    private var locationResubscribes = 0
+
+    private val providerWatcher = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            // Hop to the logger thread: everything that touches the writers and counters runs
+            // there, and a broadcast arrives on the main thread.
+            loggerHandler.post { ensureLocationSubscribed() }
+        }
     }
 
     private val locationCallback = object : LocationCallback() {
@@ -1112,6 +1269,109 @@ class SensorService : Service() {
     @SuppressLint("MissingPermission")
     private fun registerGnssStatus() {
         locationManager.registerGnssStatusCallback(gnssCallback, loggerHandler)
+
+        // Raw measurements are not guaranteed. Every Android device since API 24 exposes the
+        // API, but whether the chipset actually delivers anything is a per-device decision, and
+        // some vendors return an empty stream rather than failing. The registration result is
+        // recorded either way so a session with no gnss_raw.csv rows can be told apart from a
+        // session where the callback was never accepted.
+        gnssRawSupported = try {
+            locationManager.registerGnssMeasurementsCallback(measurementsCallback, loggerHandler)
+        } catch (e: Exception) {
+            Log.w(TAG, "Raw GNSS measurements unavailable", e)
+            false
+        }
+        gnssNavSupported = try {
+            locationManager.registerGnssNavigationMessageCallback(navMessageCallback, loggerHandler)
+        } catch (e: Exception) {
+            Log.w(TAG, "GNSS navigation messages unavailable", e)
+            false
+        }
+        Log.i(TAG, "Raw GNSS: measurements=$gnssRawSupported nav=$gnssNavSupported")
+    }
+
+    /**
+     * Per-satellite observables: Doppler, code phase, carrier phase and the receiver clock.
+     *
+     * Logging only. Nothing in the navigation path reads this yet - the sub-four-satellite
+     * velocity solution it exists to feed is a draft in eval/scarce_gnss.py, and the whole
+     * reason for recording is that the draft has only ever been tested against a simulated
+     * constellation.
+     */
+    private val measurementsCallback = object : GnssMeasurementsEvent.Callback() {
+        override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
+            val t = SystemClock.elapsedRealtimeNanos()
+            val c = event.clock
+            // Absent fields are written empty rather than as a sentinel: 0 is a legal value for
+            // most of these, so a sentinel would be indistinguishable from a real reading.
+            val fullBias = if (c.hasFullBiasNanos()) c.fullBiasNanos.toString() else ""
+            val bias = if (c.hasBiasNanos()) c.biasNanos.toString() else ""
+            val drift = if (c.hasDriftNanosPerSecond()) c.driftNanosPerSecond.toString() else ""
+            val driftUnc = if (c.hasDriftUncertaintyNanosPerSecond())
+                c.driftUncertaintyNanosPerSecond.toString() else ""
+            val leap = if (c.hasLeapSecond()) c.leapSecond.toString() else ""
+
+            for (m in event.measurements) {
+                val sb = rowBuilder
+                sb.setLength(0)
+                sb.append(t).append(',')
+                    .append(c.timeNanos).append(',')
+                    .append(fullBias).append(',')
+                    .append(bias).append(',')
+                    .append(drift).append(',')
+                    .append(driftUnc).append(',')
+                    .append(c.hardwareClockDiscontinuityCount).append(',')
+                    .append(leap).append(',')
+                    .append(m.svid).append(',')
+                    .append(m.constellationType).append(',')
+                    .append(m.state).append(',')
+                    .append(m.receivedSvTimeNanos).append(',')
+                    .append(m.receivedSvTimeUncertaintyNanos).append(',')
+                    .append(m.cn0DbHz).append(',')
+                    .append(m.pseudorangeRateMetersPerSecond).append(',')
+                    .append(m.pseudorangeRateUncertaintyMetersPerSecond).append(',')
+                    .append(m.accumulatedDeltaRangeMeters).append(',')
+                    .append(m.accumulatedDeltaRangeUncertaintyMeters).append(',')
+                    .append(m.accumulatedDeltaRangeState).append(',')
+                    .append(if (m.hasCarrierFrequencyHz()) m.carrierFrequencyHz.toString() else "")
+                    .append(',')
+                    .append(m.multipathIndicator).append('\n')
+                writeRow(gnssRawWriter, sb)
+                gnssRawRows++
+            }
+        }
+
+        override fun onStatusChanged(status: Int) {
+            Log.i(TAG, "GNSS measurements status $status")
+        }
+    }
+
+    /**
+     * Broadcast ephemeris, kept as raw subframe bytes.
+     *
+     * Doppler alone does not give velocity: equation (2) in eval/scarce_gnss.py needs each
+     * satellite's own position and velocity to subtract, and those come from the ephemeris.
+     * Decoding subframes on the phone would be work with no on-device consumer, so the bytes
+     * are stored base64 and decoded offline.
+     */
+    private val navMessageCallback = object : GnssNavigationMessage.Callback() {
+        override fun onGnssNavigationMessageReceived(msg: GnssNavigationMessage) {
+            val sb = rowBuilder
+            sb.setLength(0)
+            sb.append(SystemClock.elapsedRealtimeNanos()).append(',')
+                .append(msg.type).append(',')
+                .append(msg.svid).append(',')
+                .append(msg.messageId).append(',')
+                .append(msg.submessageId).append(',')
+                .append(msg.status).append(',')
+                .append(Base64.encodeToString(msg.data, Base64.NO_WRAP)).append('\n')
+            writeRow(gnssNavWriter, sb)
+            gnssNavRows++
+        }
+
+        override fun onStatusChanged(status: Int) {
+            Log.i(TAG, "GNSS navigation message status $status")
+        }
     }
 
     /**
@@ -1212,6 +1472,14 @@ class SensorService : Service() {
                         .put("imu_samples", imuSamples)
                         .put("gps_fixes", gpsFixes)
                         .put("write_errors", writeErrors)
+                        // Supported-but-silent and never-registered look identical from the CSV
+                        // alone, and they mean different things: one is a chipset that withholds
+                        // raw data, the other is a bug. Both are recorded.
+                        .put("gnss_raw_supported", gnssRawSupported)
+                        .put("gnss_raw_rows", gnssRawRows)
+                        .put("gnss_nav_supported", gnssNavSupported)
+                        .put("gnss_nav_rows", gnssNavRows)
+                        .put("location_subscribes", locationResubscribes)
                         .put(
                             "duration_s",
                             (SystemClock.elapsedRealtimeNanos() - sessionStartRealtimeNs) / 1e9,

@@ -34,6 +34,7 @@
     <string name="preload_tiles">Preload tiles around me…</string>
     <string name="download">Download</string>
     <string name="installed">Installed</string>
+    <string name="installing">Installing…</string>
     <string name="cancel">Cancel</string>
     <string name="delete">Delete</string>
     <string name="show_panel">Show session panel</string>

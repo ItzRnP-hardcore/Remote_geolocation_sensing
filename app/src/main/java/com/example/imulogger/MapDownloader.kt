@@ -5,6 +5,9 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import java.io.File
+import java.io.FileInputStream
+import java.io.InputStream
+import java.util.Collections
 
 /**
  * Fetches Mapsforge regional maps onto the device.
@@ -17,6 +20,12 @@ import java.io.File
  * Files land as `<zone>.map.part` and are renamed to `<zone>.map` only after the header check
  * passes. [MapsforgeSource] only looks for `.map`, so a download in flight — or one that arrived
  * truncated — is never handed to the renderer.
+ *
+ * Promotion is not automatic on DownloadManager's side: it writes the file and sends one
+ * broadcast, and that is all. Somebody has to call [promoteCompleted] afterwards, and because the
+ * user will almost always have left the app by the time a 200 MB transfer lands, that call has to
+ * come from the activity lifecycle and the completion broadcast, not from a dialog that happens
+ * to be open.
  */
 object MapDownloader {
 
@@ -50,6 +59,18 @@ object MapDownloader {
         File(OfflineMaps.baseDir(context), "${zone.id}.map.part")
 
     fun isInstalled(context: Context, zone: Zone): Boolean = installedFile(context, zone).isFile
+
+    /**
+     * Zones whose download has finished and whose file is being verified and moved into place.
+     * The copy fallback in [promoteCompleted] can take several seconds for a half-gigabyte file,
+     * and the settings sheet uses this to say "Installing" rather than offering Download again.
+     */
+    val installing: MutableSet<String> = Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** True when at least one tracked download has left the running state and needs promoting. */
+    fun hasCompletedDownloads(context: Context): Boolean = INDIA_ZONES.any { zone ->
+        downloadId(context, zone) != null && progress(context, zone)?.running == false
+    }
 
     // ------------------------------------------------------------------ enqueue
 
@@ -109,54 +130,145 @@ object MapDownloader {
     }
 
     /**
-     * Promote any finished download into place.
+     * Promote any finished download into place. Does file I/O, so call it off the main thread.
      *
      * Returns the zones that became usable, so the caller can re-attach the map. Verifying the
      * magic bytes first means a captive-portal HTML page or a truncated transfer is discarded
      * here rather than surfacing later as an unexplained fallback to raster tiles.
+     *
+     * The finished file belongs to the system download provider, not to this app, so a plain
+     * rename can be refused even though it sits in our own external-files directory. The header
+     * is therefore read through [DownloadManager.openDownloadedFile], which the provider grants
+     * regardless of ownership, and if the rename is refused the same descriptor is copied into
+     * place instead. Either way the provider's record is removed afterwards so the `.part` file
+     * does not linger in the Downloads app.
      */
     fun promoteCompleted(context: Context): List<Zone> {
         val promoted = mutableListOf<Zone>()
         for (zone in INDIA_ZONES) {
             val id = downloadId(context, zone) ?: continue
-            val status = progress(context, zone)?.status ?: continue
+            val status = progress(context, zone)?.status
+            if (status == null) {
+                // The provider no longer knows this id: the user cleared it from the Downloads
+                // app, or the record was reaped. Nothing to promote; stop tracking it.
+                clearDownloadId(context, zone)
+                partFile(context, zone).delete()
+                continue
+            }
             if (status != DownloadManager.STATUS_SUCCESSFUL) {
                 if (status == DownloadManager.STATUS_FAILED) {
                     Log.w(TAG, "Download of ${zone.id} failed")
+                    manager(context).remove(id)
                     clearDownloadId(context, zone)
                     partFile(context, zone).delete()
                 }
                 continue
             }
 
-            val part = partFile(context, zone)
-            if (!part.isFile || !hasMapsforgeHeader(part)) {
-                Log.e(TAG, "${part.name} is not a Mapsforge file; discarding")
-                part.delete()
-                clearDownloadId(context, zone)
-                continue
+            installing.add(zone.id)
+            try {
+                if (install(context, zone, id)) promoted.add(zone)
+            } finally {
+                installing.remove(zone.id)
             }
-            val target = installedFile(context, zone)
-            target.delete()
-            if (part.renameTo(target)) {
-                promoted.add(zone)
-                Log.i(TAG, "Installed ${target.name} (${target.length()} bytes)")
-            } else {
-                Log.e(TAG, "Could not move ${part.name} into place")
-            }
-            clearDownloadId(context, zone)
         }
         return promoted
     }
 
-    private fun hasMapsforgeHeader(file: File): Boolean = try {
-        file.inputStream().use { input ->
-            val head = ByteArray(MAGIC.size)
-            input.read(head) == MAGIC.size && head.contentEquals(MAGIC)
+    private fun install(context: Context, zone: Zone, id: Long): Boolean {
+        val manager = manager(context)
+        val target = installedFile(context, zone)
+        val part = downloadedFile(context, zone, id)
+
+        val valid = try {
+            manager.openDownloadedFile(id).use { pfd ->
+                FileInputStream(pfd.fileDescriptor).use { hasMapsforgeHeader(it) }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot open finished download ${zone.id}", e)
+            false
         }
+        if (!valid) {
+            Log.e(TAG, "Download of ${zone.id} is not a Mapsforge file; discarding")
+            manager.remove(id)
+            clearDownloadId(context, zone)
+            part.delete()
+            return false
+        }
+
+        target.delete()
+        var installed = part.isFile && part.renameTo(target)
+        if (!installed) {
+            // Rename refused, or the provider put the file somewhere we did not expect. Copy the
+            // bytes through the provider's descriptor into a temp file and rename that instead, so
+            // a kill mid-copy can never leave a truncated `.map` behind.
+            Log.i(TAG, "Rename of ${part.name} refused; copying ${zone.id} into place")
+            val tmp = File(target.parentFile, "${zone.id}.map.tmp")
+            installed = try {
+                manager.openDownloadedFile(id).use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { input ->
+                        tmp.outputStream().use { output ->
+                            input.copyTo(output, 1 shl 16)
+                            output.fd.sync()
+                        }
+                    }
+                }
+                tmp.renameTo(target)
+            } catch (e: Exception) {
+                Log.e(TAG, "Copy of ${zone.id} failed", e)
+                false
+            }
+            if (!installed) tmp.delete()
+        }
+
+        if (installed) {
+            Log.i(TAG, "Installed ${target.name} (${target.length()} bytes)")
+            // Drop the provider's record. The bytes are ours now; if the provider still holds
+            // its own copy this deletes it, and if we renamed it away this just tidies the list.
+            manager.remove(id)
+            clearDownloadId(context, zone)
+            part.delete()
+        } else {
+            Log.e(TAG, "Could not move ${zone.id} into place; will retry next time")
+        }
+        return installed
+    }
+
+    /**
+     * Where the provider actually wrote the file. Normally the `.part` path we asked for, but
+     * DownloadManager renames on collision (`name-1.map.part`), and its own record is the truth.
+     */
+    private fun downloadedFile(context: Context, zone: Zone, id: Long): File {
+        val expected = partFile(context, zone)
+        return try {
+            manager(context).query(DownloadManager.Query().setFilterById(id)).use { c ->
+                if (c == null || !c.moveToFirst()) return expected
+                val uri = c.getString(c.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+                    ?: return expected
+                Uri.parse(uri).path?.let { File(it) }?.takeIf { it.isFile } ?: expected
+            }
+        } catch (e: Exception) {
+            expected
+        }
+    }
+
+    /** True when [file] starts with the Mapsforge magic, so it is at least the right kind of file. */
+    fun hasMapsforgeHeader(file: File): Boolean = try {
+        file.inputStream().use { hasMapsforgeHeader(it) }
     } catch (e: Exception) {
         Log.e(TAG, "Could not read ${file.name}", e)
         false
+    }
+
+    private fun hasMapsforgeHeader(input: InputStream): Boolean {
+        val head = ByteArray(MAGIC.size)
+        var read = 0
+        while (read < head.size) {
+            val n = input.read(head, read, head.size - read)
+            if (n < 0) break
+            read += n
+        }
+        return read == MAGIC.size && head.contentEquals(MAGIC)
     }
 
     // ------------------------------------------------------------------ plumbing

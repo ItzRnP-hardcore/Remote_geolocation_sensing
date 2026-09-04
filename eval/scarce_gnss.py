@@ -73,10 +73,21 @@ N_PLANES = 6
 SATS_PER_PLANE = 4
 INCLINATION = math.radians(55.0)
 
-# Smartphone pseudorange-rate noise. A survey-grade receiver reaches 0.01-0.05 m/s; a phone
-# is far worse and varies with C/N0. 0.3 is a deliberately pessimistic central value and the
-# sweep below shows the sensitivity, because this is the number the whole result rests on.
-SIGMA_RHODOT_MPS = 0.30
+# Smartphone pseudorange-rate noise, and the number the entire result rests on.
+#
+# MEASURED, on session 20260905_025543 (SM-G990E, Broadcom BCM4775, 306 measurements over
+# 26 epochs): median reported uncertainty 1.17 m/s at a mean C/N0 of 22.5 dB-Hz. That was
+# recorded INDOORS, which is close to worst case - C/N0 outdoors is typically 40+ dB-Hz and
+# the uncertainty falls accordingly. Note also that ~10% of measurements report an
+# uncertainty of exactly 299792458 (the speed of light), which is Android's sentinel for
+# "unknown" and must be discarded rather than believed.
+#
+# The default stays 0.5 as a plausible open-sky value, but every conclusion should be read
+# with the sweep: at 0.30 a single satellite reaches 0.40 m/s, at 0.50 it reaches 0.74 m/s
+# with 27% availability, and at the measured indoor 1.17 the covariance gate rejects almost
+# everything and the method is worth nothing. Which regime a real drive sits in is not yet
+# known, because no outdoor recording with raw measurements exists.
+SIGMA_RHODOT_MPS = 0.50
 
 # Elevation below which a satellite is not usable in an urban canyon or tunnel mouth.
 MIN_ELEVATION_DEG = 15.0

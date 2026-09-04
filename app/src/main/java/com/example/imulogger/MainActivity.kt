@@ -1,7 +1,11 @@
 package com.example.imulogger
 
 import android.Manifest
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +26,7 @@ import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
 import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
 import android.graphics.DashPathEffect
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
 
@@ -55,6 +60,23 @@ class MainActivity : AppCompatActivity() {
     private var radiusKm = 10.0
     private var lastPrefetchCentre: GeoPoint? = null
     private var prefetching = false
+
+    /** One promotion at a time: onResume and the completion broadcast can fire back to back. */
+    private val promoting = AtomicBoolean(false)
+
+    /** Set while the settings sheet is open, so a finished install can refresh its rows. */
+    private var settingsRefresh: (() -> Unit)? = null
+
+    /**
+     * Fires when DownloadManager finishes any download while the activity is visible. Without
+     * it a map that lands while the user is looking at the map only appears after the next
+     * onResume, which is exactly the moment they are not going to trigger.
+     */
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == DownloadManager.ACTION_DOWNLOAD_COMPLETE) promoteDownloads()
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -137,14 +159,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // A system broadcast, so the receiver has to be exported for Android 14+ to deliver it.
+        ContextCompat.registerReceiver(
+            this,
+            downloadReceiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            ContextCompat.RECEIVER_EXPORTED,
+        )
+    }
+
     override fun onResume() {
         super.onResume()
         binding.map.onResume()
+        // The common case: the download finished while the app was in the background or dead.
+        promoteDownloads()
     }
 
     override fun onPause() {
         binding.map.onPause()
         super.onPause()
+    }
+
+    override fun onStop() {
+        unregisterReceiver(downloadReceiver)
+        super.onStop()
     }
 
     // ------------------------------------------------------------------ map
@@ -568,6 +608,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Move any finished map download into place and, if one landed, rebuild the map on it.
+     *
+     * Runs on its own thread rather than lifecycleScope: the copy fallback can take several
+     * seconds on a half-gigabyte file, and cancelling it because the user rotated the screen
+     * would leave the download un-promoted until the next resume, which is the bug this exists
+     * to fix. The UI work at the end checks the activity is still alive.
+     */
+    private fun promoteDownloads() {
+        if (!MapDownloader.hasCompletedDownloads(this)) return
+        if (!promoting.compareAndSet(false, true)) return
+        settingsRefresh?.invoke() // show "Installing" straight away
+        val appContext = applicationContext
+        Thread({
+            val promoted = try {
+                MapDownloader.promoteCompleted(appContext)
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Map promotion failed", e)
+                emptyList()
+            } finally {
+                promoting.set(false)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed || !::binding.isInitialized) return@runOnUiThread
+                if (promoted.isNotEmpty()) {
+                    reattachMap()
+                    Toast.makeText(
+                        this,
+                        "Offline map installed: " + promoted.joinToString { it.label.substringBefore(" (") },
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                settingsRefresh?.invoke()
+            }
+        }, "map-install").start()
+    }
+
     // ------------------------------------------------------------------ settings
 
     private fun showSettings() {
@@ -599,16 +676,18 @@ class MainActivity : AppCompatActivity() {
         // going idle, which burns battery and blocks UI automation from ever settling.
         val ticker = object : Runnable {
             override fun run() {
-                MapDownloader.promoteCompleted(this@MainActivity)
-                    .takeIf { it.isNotEmpty() }
-                    ?.let { reattachMap() }
+                promoteDownloads()
                 bindZoneRows(list, storage) { rescheduleTicker(list, this) }
                 rescheduleTicker(list, this)
             }
         }
+        settingsRefresh = { refreshRows(list, storage) }
         bindZoneRows(list, storage) { list.post(ticker) }
         rescheduleTicker(list, ticker)
-        sheet.setOnDismissListener { list.removeCallbacks(ticker) }
+        sheet.setOnDismissListener {
+            list.removeCallbacks(ticker)
+            settingsRefresh = null
+        }
         sheet.show()
     }
 
@@ -629,8 +708,15 @@ class MainActivity : AppCompatActivity() {
             name.text = zone.label
             val installed = MapDownloader.isInstalled(this, zone)
             val progress = MapDownloader.progress(this, zone)
+            val installingNow = zone.id in MapDownloader.installing ||
+                progress?.status == DownloadManager.STATUS_SUCCESSFUL
 
             when {
+                installingNow -> {
+                    status.text = getString(R.string.installing)
+                    action.text = getString(R.string.installing)
+                    action.isEnabled = false
+                }
                 progress != null && progress.running -> {
                     status.text = String.format(
                         Locale.US, "%d%%  %d / %d MB",
@@ -946,8 +1032,14 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.w("MainActivity", "Cannot size $MAP_ASSET", e)
             -1L
         }
+        // No bundled asset in this build: whatever is on disk was downloaded or side-loaded by
+        // the user, and deleting it here would be exactly the "my map vanished" bug.
+        if (assetLength <= 0) return
         // A file of exactly the right length is the one case we can skip.
-        if (mapFile.exists() && assetLength > 0 && mapFile.length() == assetLength) return
+        if (mapFile.exists() && mapFile.length() == assetLength) return
+        // A different length is fine too if it is a real Mapsforge file: the user downloaded a
+        // newer build of the same zone from the server, and it must not be clobbered.
+        if (mapFile.exists() && MapDownloader.hasMapsforgeHeader(mapFile)) return
         if (mapFile.exists()) {
             android.util.Log.w(
                 "MainActivity",
