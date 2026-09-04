@@ -48,6 +48,39 @@ train fit).
 
 So the levers are capacity, regularisation and data - in that order - not features.
 
+## Data is exhausted at 26 runs
+
+Checked, so nobody repeats it:
+
+- The synchronised archive ships each of its 72 journeys **twice**, under
+  `Categorised` and `Uncategorised`, trimmed differently (all 72 stems shared, none
+  with matching file size). Using both would put the same journey on both sides of a
+  split. Only `Categorised` is used.
+- The unsynchronised archive has 97 S-files. 72 duplicate the ones above; the 25
+  genuinely new journeys have **no V pair**, so no ground truth. No labelled data
+  there.
+- So IO-VNBD gives 26 usable runs / 19.9 h and no more. Further data must come from
+  our own recording or another corpus. Zenodo, UCI, GitHub and HuggingFace are all
+  reachable from this machine if that becomes the priority.
+
+## Held-out journeys are not independent
+
+Every number in the table above holds out *journeys*. That answers "does this
+generalise to another drive", not "to another car, phone and mounting" - which is
+what the per-session bias failure actually asks.
+
+The test boxes overlap the training boxes: `S3c` against `S3a` 46% and against `M_r2`
+50%; `S2_r1` against `M_r2` 34%. All 26 runs are a few routes around Coventry, so a
+model can learn a road's vibration signature and habitual speed and score well without
+generalising.
+
+`--test-driver {A,B,D,E}` now holds out a whole driver. Folds: A (6 runs, S\*),
+B (3, M\*), D (1, Y\*), E (16, V\*). Expect worse numbers; they will be the honest ones.
+
+Also verified: no run family spans train and test under the journey split - runs cut
+from one file by a clock reset (`S4`, `S4_r1`) land together. Two families span train
+and validation, which inflates validation only.
+
 ## What is queued
 
 1. **(running)** Does doubling the data help? Experiment 4.
