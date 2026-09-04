@@ -48,16 +48,26 @@ WINDOW = 100
 M_PER_DEG_LAT = 111_132.0
 
 
-def load_runs(npz_path: str):
+def load_runs(npz_path: str, frame: str = "vehicle"):
+    """Runs with features in the frame the checkpoint was TRAINED in.
+
+    Feeding a model the wrong framing does not error, it just returns confident nonsense, so
+    the caller has to say which one. `frame` mirrors build_dataset_iovnbd.--frame exactly.
+    """
     d = np.load(npz_path, allow_pickle=True)
     starts, lengths = d["run_starts"], d["run_lengths"]
     names = [str(x) for x in d["run_names"]]
+    if frame == "earth":
+        from build_dataset_iovnbd import earth_frame
+        acc_all, gyr_all = earth_frame(d["accel"], d["quat"]), d["gyro"]
+    else:
+        acc_all, gyr_all = d["vehicle_accel"], d["vehicle_gyro"]
     runs = []
     for i, (s0, n) in enumerate(zip(starts, lengths)):
         sl = slice(int(s0), int(s0) + int(n))
         runs.append({
             "name": names[i],
-            "feat": np.concatenate([d["vehicle_accel"][sl], d["vehicle_gyro"][sl]], axis=1),
+            "feat": np.concatenate([acc_all[sl], gyr_all[sl]], axis=1),
             "speed": d["truth_speed"][sl],
             "heading": d["truth_heading"][sl],
             "yaw_rate": d["truth_yaw_rate"][sl],
@@ -217,6 +227,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dataset", default=os.path.join("ml_model", "dataset_iovnbd.pt"))
     ap.add_argument("--runs", default="", help="comma-separated run names (default: test runs)")
     ap.add_argument("--durations", default="30,60,120,300")
+    ap.add_argument("--frame", choices=("vehicle", "earth"), default="vehicle",
+                    help="the frame the checkpoint was trained in")
     args = ap.parse_args(argv)
 
     # Normalisation must be the training set's, not this run's, or the model sees
@@ -243,7 +255,7 @@ def main(argv=None) -> int:
 
     wanted = ({x.strip() for x in args.runs.split(",") if x.strip()}
               if args.runs else test_names)
-    runs = [r for r in load_runs(args.npz) if r["name"] in wanted]
+    runs = [r for r in load_runs(args.npz, args.frame) if r["name"] in wanted]
     if not runs:
         print(f"no runs matched {sorted(wanted)}")
         return 1
@@ -270,7 +282,7 @@ def main(argv=None) -> int:
         if run["name"] in bias_map:
             feat = feat - bias_map[run["name"]]
             
-        run["gyro_yaw"] = feat[:, 5]
+        run["gyro_yaw"] = feat[:, 5]   # vertical rate in either framing
         sp, yw = predict(model, feat, norm_mean, norm_sd)
         if sp is None:
             continue

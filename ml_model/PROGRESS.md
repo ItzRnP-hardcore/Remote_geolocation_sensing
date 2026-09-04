@@ -105,6 +105,79 @@ loss. `losses.py` pre-registered this outcome and it came true.
 - **Pin the split.** A rebuild without `--fixed-test S2_r1,S3c` silently moved the test
   set to M + S4_r1, making every number incomparable to this log. Always pass it.
 
+### On-device heading: measured on our own recording, not IO-VNBD
+
+`eval/session_eval.py` now scores every heading source the phone records against that
+session's own GNSS bearing, over the 188 s driving span of `20260904_195146`:
+
+| source | RMS error | drift |
+|---|---|---|
+| **rotation vector (`rv`)** | **10.8 deg** | -433 deg/hr |
+| accel + magnetometer (what the app used) | 12.6 deg | -423 deg/hr |
+| gyro integrated, debiased in DEVICE frame | 16.1 deg | -682 deg/hr |
+| game_rv (no magnetometer) | 31.8 deg | +377 deg/hr |
+| gyro integrated, raw | 35.9 deg | +879 deg/hr |
+
+Two traps here, both of which produced a plausible-looking wrong answer first.
+
+**Debias in device axes, not world axes.** The offset belongs to the sensor die, so it is
+constant in the handset's own frame. Removing it from the world-frame vertical projection
+instead measured 43.7 deg RMS - *worse than not debiasing at all* - because the projection
+depends on how the phone was tilted at each stop. Done in device axes it is 16.1 deg.
+
+**Stand-still must mean the DEVICE is still.** Gating on GNSS speed learns +1.95 deg/s of
+"bias" on this recording, which is the phone being handled while the car sat parked from
+200 s on. `DeadReckoner`'s accelerometer- and gyro-norm gates already had this right.
+
+The app now levels the model on the rotation vector rather than the magnetometer matrix,
+and subtracts the device-frame gyro bias before inference. Note this does NOT contradict
+the IO-VNBD result above: there the comparison was the model's yaw head against the gyro,
+and the head lost. Here it is the gyro against a magnetometer-referenced attitude, which
+is absolute and does not accumulate - over a 188 s drive that wins, and it keeps working
+in a tunnel because it is not GNSS.
+
+### Earth frame costs nothing, and it is still not enough
+
+Trained on `dataset_earth.pt` (the framing `IMUModelRunner` actually feeds), same fixed
+split, two seeds:
+
+| framing | test RMSE | shippable drift 60 s | 300 s |
+|---|---|---|---|
+| vehicle (3 seeds) | 4.078 +/- 0.185 | 17.0-18.5% | 19.1-19.5% |
+| **earth** (2 seeds) | **4.149** (4.168, 4.129) | 17.8-19.5% | 18.7-20.0% |
+
+Identical inside seed noise. **Train in the earth frame** - it is free, and it is the only
+framing that can be exported without either changing the app or estimating a
+device-to-vehicle rotation on-device that a phone has no CAN bus to fit against.
+
+But fixing the frame did NOT make the model transfer. Replayed on our own recording
+`20260904_195146`, earth-frame checkpoint, earth-frame features:
+
+| | RMSE | vs constant | r | bias |
+|---|---|---|---|---|
+| model `mu` | 4.864 | **-127%** | **-0.191** | +2.723 |
+| **the integrator alone** | **1.384** | **+34.6%** | **+0.806** | -0.308 |
+
+The integrator is **3.5x better than the model** on this hardware, and the model is
+anti-correlated with truth, so no affine recalibration rescues it - there is no signal to
+rescale. This is not a frame bug: `build_dataset_iovnbd.earth_frame` and
+`session_eval.quat_to_matrix` agree to 9e-15, so the comparison is valid. It is the domain
+gap - different country, car, handset, mounting, and a 6.3 m/s campus speed profile against
+IO-VNBD's 9.2 m/s.
+
+**Do not ship the speed model.** Ship the integrator, which already beats a constant by
+34.6% on our own data. The model becomes worth shipping when it is trained on our own
+recordings, and that needs far more than the ~10 minutes of moving data currently on disk.
+
+### Where the integrator actually fails
+
+Not stand-still, and not ZUPT. On `20260904_195146` the integrator tracks GNSS speed to
+1.38 m/s RMSE while driving, then runs to 56.8 m/s after parking - because GNSS accuracy
+collapsed from 6 m to a 200 m median and the fix rate fell to 0.15 Hz, leaving it genuinely
+unaided for ~190 s. Short outages are fine (14 free-run segments, all under 15 s, max
+12.5 m/s and r = 0.687). Unaided speed error grows without bound over minutes, which is
+what the map, not the model, is there to arrest.
+
 ### The gap that caps all of this: train/serve skew
 
 Nothing above reaches the phone yet. `IMUModelRunner` feeds **earth-frame** levelled
