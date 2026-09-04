@@ -57,6 +57,15 @@ class DeadReckoner {
         const val MIN_SPEED_FOR_HEADING_FIX = 2.0
 
         /**
+         * Position error as a fraction of distance travelled while unaided.
+         *
+         * Measured, not assumed: free-running the model as a dead reckoner over the held-out
+         * IO-VNBD runs gives 17-20% of distance at 60-300 s once heading comes from the
+         * debiased gyro. See ml_model/PROGRESS.md.
+         */
+        const val DRIFT_FRACTION_OF_DISTANCE = 0.18
+
+        /**
          * Most the map may rotate the course in one update, degrees.
          *
          * This is the safety valve on a feedback loop: the matcher feeds heading back into the
@@ -124,9 +133,36 @@ class DeadReckoner {
     var isStationary: Boolean = false
         private set
 
-    /** Metres of drift accumulated since the last GNSS anchor. */
+    /**
+     * Straight-line DISPLACEMENT from the last GNSS anchor, metres.
+     *
+     * Not error, despite the name reading like it. Driving 200 m down a straight road with a
+     * perfect integrator sets this to 200. It was being passed to [MapMatcher] as the position
+     * uncertainty, which is why a fix that was still accurate could be dragged tens of metres
+     * onto a neighbouring road: the budget grew simply because the vehicle went somewhere. Use
+     * [positionSigmaM] for uncertainty and keep this for what it says.
+     */
     var driftMetres: Double = 0.0
         private set
+
+    /** Path length travelled since the last GNSS anchor, metres. */
+    var distanceSinceAnchor: Double = 0.0
+        private set
+
+    /**
+     * 1-sigma position uncertainty, metres.
+     *
+     * Free-running drift is measured at 17-20% of distance travelled across the held-out runs,
+     * so uncertainty is modelled as a fraction of distance DRIVEN rather than of time elapsed
+     * or of displacement. Time is wrong because a vehicle stopped at lights accumulates no
+     * error; displacement is wrong because it grows while GNSS is healthy and the anchor keeps
+     * resetting it anyway.
+     *
+     * Measured effect on map matching, simulating a 60 s outage on session 20260904_195146:
+     * swapping [driftMetres] for this took the share of snaps that moved the fix TOWARD truth
+     * from 29% to 61%.
+     */
+    val positionSigmaM: Double get() = DRIFT_FRACTION_OF_DISTANCE * distanceSinceAnchor
 
     private var anchorE = 0.0
     private var anchorN = 0.0
@@ -310,6 +346,7 @@ class DeadReckoner {
         pN += vN * dt
         pU += vU * dt
 
+        distanceSinceAnchor += sqrt(vE * vE + vN * vN) * dt
         driftMetres = sqrt((pE - anchorE) * (pE - anchorE) + (pN - anchorN) * (pN - anchorN))
     }
 
@@ -326,6 +363,7 @@ class DeadReckoner {
         anchorE = pE
         anchorN = pN
         driftMetres = 0.0
+        distanceSinceAnchor = 0.0
 
         // GNSS velocity is far better than anything the accelerometer can integrate, so take it
         // whenever it is offered rather than blending.

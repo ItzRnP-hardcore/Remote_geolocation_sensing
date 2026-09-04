@@ -79,6 +79,23 @@ class MapMatcher(private val roads: RoadNetwork) {
          */
         private const val MIN_CORRECTION_BUDGET_M = 12.0
 
+        /**
+         * Uncertainty below which the matcher declines to snap at all.
+         *
+         * The map is not more accurate than a well-aided integrator, and pretending otherwise
+         * costs accuracy: a road centreline sits a lane-width from the line actually driven, and
+         * OSM geometry carries its own error on top. Measured on session 20260904_195146, where
+         * GNSS stayed healthy and the integrator sat 4.85 m from truth, snapping every fix moved
+         * the mean error to 9.85 m and improved only 2% of fixes. Declining below 25 m of
+         * uncertainty brings that to 5.92 m, and during a simulated 60 s outage it raises the
+         * share of snaps that help from 61% to 95% - fewer corrections, nearly all of them right.
+         *
+         * It also removes the symptom that prompted this: every snap onto a road disconnected
+         * from the previous one occurred in the confident regime, and gating eliminates them
+         * without needing a connectivity test.
+         */
+        private const val MIN_UNCERTAINTY_TO_SNAP_M = 25.0
+
         private const val M_PER_DEG_LAT = 111_132.0
     }
 
@@ -128,6 +145,15 @@ class MapMatcher(private val roads: RoadNetwork) {
         speedMps: Double,
         uncertaintyM: Double,
     ): Match? {
+        // Snapping a fix that is already better than the map makes it worse. Declining is the
+        // correct answer, not a missed opportunity - see MIN_UNCERTAINTY_TO_SNAP_M.
+        if (uncertaintyM < MIN_UNCERTAINTY_TO_SNAP_M) {
+            // The chain is still advanced so hypotheses stay warm for when aiding is lost.
+            lastLat = lat
+            lastLon = lon
+            return null
+        }
+
         val radius = (BASE_SEARCH_RADIUS_M + uncertaintyM).coerceAtMost(MAX_SEARCH_RADIUS_M)
         val candidates = roads.candidatesNear(lat, lon, radius)
             .sortedBy { it.distanceM }

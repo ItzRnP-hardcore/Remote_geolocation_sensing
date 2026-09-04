@@ -770,7 +770,10 @@ class SensorService : Service() {
                         if (unaidedSinceNs == 0L) unaidedSinceNs = now
                         val course = deadReckoner.courseDeg
                         val speed = deadReckoner.speed
-                        val uncertainty = deadReckoner.driftMetres
+                        // Modelled uncertainty, not displacement since the anchor. The old
+                        // value grew simply because the vehicle drove somewhere, which let
+                        // the matcher move an accurate fix onto a neighbouring road.
+                        val uncertainty = deadReckoner.positionSigmaM
                         val unaidedS = (now - unaidedSinceNs) / 1e9
 
                         // The integrator's *distance* is the one channel worth keeping during a
@@ -785,7 +788,13 @@ class SensorService : Service() {
                         // reported once displacement is large enough to be worth overriding dead
                         // reckoning; see AlongRoadTracker for why both halves matter.
                         val walk = AlongRoadTracker.enabled
-                        val handOver = AlongRoadTracker.shouldHandOver(unaidedS, uncertainty)
+                        // driftMetres, not the sigma: this gate asks "has the vehicle moved far
+                        // enough from the anchor for a road walk to beat dead reckoning", which is
+                        // a question about displacement, and HANDOVER_DISPLACEMENT_M was tuned
+                        // against that quantity. The matcher's budget is a different question and
+                        // takes the modelled uncertainty above.
+                        val handOver = AlongRoadTracker.shouldHandOver(
+                            unaidedS, deadReckoner.driftMetres)
                         matchHandler.post {
                             if (walk) maintainAlongRoad(now, p, course, stepM, handOver)
                             if (!handOver) runMapMatcher(now, p, course, speed, uncertainty)

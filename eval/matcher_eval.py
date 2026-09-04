@@ -189,14 +189,20 @@ class Roads:
 class Matcher:
     """MapMatcher.kt, with the two proposed changes behind flags."""
 
-    def __init__(self, roads, connectivity=False, cap_budget=False):
+    def __init__(self, roads, connectivity=False, cap_budget=False, gate_m=0.0):
         self.roads = roads
         self.connectivity = connectivity
         self.cap_budget = cap_budget
+        # Below this uncertainty the integrator is better than the map and snapping is a
+        # downgrade: road centrelines sit a lane-width from the driven line and OSM geometry
+        # carries its own error, so "correcting" a 5 m fix onto a road costs accuracy.
+        self.gate_m = gate_m
         self.beam = []
         self.last = None
 
     def update(self, lat, lon, course, speed, uncertainty):
+        if uncertainty < self.gate_m:
+            return None
         radius = min(BASE_SEARCH_RADIUS_M + uncertainty, MAX_SEARCH_RADIUS_M)
         cands = sorted(self.roads.near(lat, lon, radius), key=lambda c: c[3])[:MAX_CANDIDATES]
         if not cands:
@@ -281,8 +287,8 @@ def load_track(d):
     }
 
 
-def replay(roads, tr, connectivity, cap_budget, interval=2.0):
-    m = Matcher(roads, connectivity, cap_budget)
+def replay(roads, tr, connectivity, cap_budget, interval=2.0, gate_m=0.0):
+    m = Matcher(roads, connectivity, cap_budget, gate_m)
     out = []
     nxt = tr["t"][0]
     for i in range(1, len(tr["t"])):
@@ -310,7 +316,99 @@ def replay(roads, tr, connectivity, cap_budget, interval=2.0):
     return out
 
 
+# ---------------------------------------------------------------- outage simulation
+
+def drifted_track(tr, i0, i1, drift_frac, sign=1.0):
+    """The true track as a drifting integrator would have seen it over [i0, i1).
+
+    Additive noise is the wrong model. The dominant dead-reckoning error is HEADING, and a
+    heading error does not scatter the track, it bends it: the estimate stays the right
+    length and curves away from the truth. So the outage is simulated by rotating the
+    travelled path about the anchor at a constant yaw-rate error, chosen so the endpoint
+    lands `drift_frac` of the distance travelled away from truth. That reproduces both the
+    magnitude and the SHAPE of the error the matcher has to undo, and it is the shape that
+    decides whether a road can be identified at all.
+    """
+    lat, lon = tr["glat"].copy(), tr["glon"].copy()
+    ml = mlon(lat[i0])
+    ax, ay = lon[i0] * ml, lat[i0] * M_PER_DEG_LAT
+    x = lon[i0:i1] * ml - ax
+    y = lat[i0:i1] * M_PER_DEG_LAT - ay
+    n = i1 - i0
+    if n < 2:
+        return lat, lon
+    step = np.hypot(np.diff(x), np.diff(y))
+    dist = np.concatenate([[0.0], np.cumsum(step)])
+    total = dist[-1]
+    if total < 1.0:
+        return lat, lon
+    # Small-angle: a constant yaw-rate error theta(t) = k * s(t) puts the endpoint about
+    # total * k * total / 2 off course, so solve k from the requested fraction.
+    chord = np.hypot(x[-1], y[-1])
+    if chord < 1.0:
+        return lat, lon
+    theta = sign * 2.0 * drift_frac * total / max(chord, 1.0) * (dist / max(total, 1e-9))
+    c, sn = np.cos(theta), np.sin(theta)
+    xr = c * x - sn * y
+    yr = sn * x + c * y
+    lon[i0:i1] = (xr + ax) / ml
+    lat[i0:i1] = (yr + ay) / M_PER_DEG_LAT
+    return lat, lon
+
+
+def replay_outage(roads, tr, connectivity, cap_budget, dur_s, drift_frac,
+                  interval=2.0, unc_frac=0.18, gate_m=0.0):
+    """Snap a drifting track back onto the road, over every outage window of `dur_s`.
+
+    The correction budget needs a real uncertainty, and there are three candidates:
+
+      driftMetres           what the app passes. |position - anchor|, i.e. DISPLACEMENT. It
+                            is ~5x too large during an outage and grows even when GNSS is
+                            healthy, so it licenses corrections that are not warranted.
+      k * elapsed seconds   dimensionally reasonable but wrong: a vehicle stopped at lights
+                            accumulates budget while accumulating no error.
+      k * distance driven   what this uses. Free-running drift is measured at 17-20% of
+                            distance travelled, so uncertainty is `unc_frac` of the distance
+                            since the outage began. It is the only one of the three that
+                            tracks the error it is supposed to bound.
+    """
+    n = len(tr["t"])
+    w = int(dur_s * 10)
+    out = []
+    for i0 in range(0, n - w, w):
+        i1 = i0 + w
+        lat, lon = drifted_track(tr, i0, i1, drift_frac, sign=1.0 if (i0 // w) % 2 == 0 else -1.0)
+        m = Matcher(roads, connectivity, cap_budget, gate_m)
+        nxt = tr["t"][i0]
+        for i in range(i0, i1):
+            if tr["t"][i] < nxt:
+                continue
+            nxt = tr["t"][i] + interval
+            travelled = float(np.sum(np.abs(tr["speed"][i0:i + 1])) * 0.1)
+            unc = max(unc_frac * travelled, MIN_CORRECTION_BUDGET_M)
+            j = max(i - 10, i0)
+            dy = (lat[i] - lat[j]) * M_PER_DEG_LAT
+            dx = (lon[i] - lon[j]) * mlon(lat[i])
+            course = ((math.degrees(math.atan2(dx, dy)) + 360) % 360
+                      if math.hypot(dx, dy) > 1.0 else None)
+            r = m.update(lat[i], lon[i], course, tr["speed"][i], unc)
+            ml = mlon(lat[i])
+            e_dr = math.hypot((lon[i] - tr["glon"][i]) * ml,
+                              (lat[i] - tr["glat"][i]) * M_PER_DEG_LAT)
+            if r is None:
+                out.append({"i": i, "matched": False, "e_dr": e_dr, "e_snap": e_dr})
+            else:
+                e_sn = math.hypot((r["lon"] - tr["glon"][i]) * ml,
+                                  (r["lat"] - tr["glat"][i]) * M_PER_DEG_LAT)
+                out.append({"i": i, "matched": True, "e_dr": e_dr, "e_snap": e_sn,
+                            "corr": r["corr"], "conf": r["conf"], "seg": r["seg"]})
+    return out
+
+
 def summarise(name, res, roads):
+    if not res:
+        print(f"  {name:34s} no windows")
+        return {}
     e_dr = np.array([r["e_dr"] for r in res])
     e_sn = np.array([r["e_snap"] for r in res])
     matched = np.array([r["matched"] for r in res])
@@ -332,7 +430,7 @@ def summarise(name, res, roads):
         if u not in d and v not in d:
             jumps += 1
 
-    print(f"  {name:34s} matched {matched.sum():3d}/{len(res):3d}  "
+    print(f"  {name:34s} matched {int(matched.sum()):3d}/{len(res):3d}  "
           f"mean err {e_sn.mean():6.2f} m (DR {e_dr.mean():6.2f})  "
           f"p90 {np.percentile(e_sn, 90):6.2f}  helped {helped:4.0f}%  "
           f"disconnected hops {jumps}/{pairs}")
@@ -351,11 +449,24 @@ def main(argv=None):
     tr = load_track(args.session)
     print(f"track: {len(tr['t'])} samples over {tr['t'][-1] - tr['t'][0]:.0f} s of driving\n")
 
-    for name, conn, cap in (("baseline (shipped)", False, False),
-                            ("+ connectivity", True, False),
-                            ("+ capped budget", False, True),
-                            ("+ both", True, True)):
-        summarise(name, replay(roads, tr, conn, cap), roads)
+    print("A. as recorded - GNSS healthy throughout, so the integrator is already good")
+    for name, conn, cap, gate in (("baseline (shipped)", False, False, 0.0),
+                                  ("+ connectivity", True, False, 0.0),
+                                  ("+ capped budget", False, True, 0.0),
+                                  ("+ gate at 15 m", False, False, 15.0),
+                                  ("+ gate at 25 m", False, False, 25.0)):
+        summarise(name, replay(roads, tr, conn, cap, gate_m=gate), roads)
+
+    # The matcher's whole purpose is the outage, and this session never has a real one, so
+    # measuring only case A measures the matcher outside its operating range.
+    for dur, frac in ((60, 0.18), (120, 0.18), (300, 0.18)):
+        print(f"{chr(10)}B. simulated {dur} s outage, heading-error drift to "
+              f"{frac * 100:.0f}% of distance travelled")
+        for name, conn, cap, gate in (("baseline (shipped)", False, False, 0.0),
+                                      ("+ connectivity", True, False, 0.0),
+                                      ("+ gate at 15 m", False, False, 15.0),
+                                      ("+ connectivity + gate", True, False, 15.0)):
+            summarise(name, replay_outage(roads, tr, conn, cap, dur, frac, gate_m=gate), roads)
     return 0
 
 
