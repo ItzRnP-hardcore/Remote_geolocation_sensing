@@ -163,6 +163,51 @@ def build(npz_path: str, frame: str, debias: str = "none"):
     return X, Y, R, names, np.asarray(biases)
 
 
+# IO-VNBD organises its journeys by driver, and the folder names carry it. A driver
+# is a proxy for the things that actually differ between deployments - vehicle, phone,
+# mounting - so holding one out measures something a held-out journey does not.
+DRIVER_OF = {"M": "B", "S": "A", "Y": "D", "Vf": "E", "Vta": "E", "Vtb": "E", "Vw": "E"}
+
+
+def driver_of(run_name: str) -> str:
+    """Driver letter for a run, longest prefix first so Vta beats V."""
+    base = run_name.split("_r")[0]
+    for pref in sorted(DRIVER_OF, key=len, reverse=True):
+        if base.startswith(pref):
+            return DRIVER_OF[pref]
+    return "?"
+
+
+def split_by_driver(run_ids, n_runs, names, test_driver):
+    """Hold out an entire driver.
+
+    Splitting by journey answers "does this generalise to another drive?". It does not
+    answer "does this generalise to another car and another phone in another mount?",
+    which is the question the measured failure actually poses - a per-session speed
+    bias with opposite signs. Held-out journeys share a driver, a vehicle and an area:
+    the S3c test box overlaps the S3a training box by 46%, so the two are not
+    independent in any strong sense.
+    """
+    which_run = np.zeros(n_runs, dtype=int)
+    rest = []
+    for i, nm in enumerate(names):
+        if driver_of(nm) == test_driver:
+            which_run[i] = 2
+        else:
+            rest.append(i)
+    counts = np.bincount(run_ids, minlength=n_runs).astype(float)
+    # Validation still comes from the training drivers, largest-first to the target.
+    target = VAL_FRACTION * counts[rest].sum()
+    have = 0.0
+    for i in sorted(rest, key=lambda k: -counts[k]):
+        if have < target:
+            which_run[i] = 1
+            have += counts[i]
+    return (which_run[run_ids],
+            [i for i in range(n_runs) if which_run[i] == 2],
+            [i for i in range(n_runs) if which_run[i] == 1])
+
+
 def split_by_run(run_ids, n_runs, seed: int = 0, names=None, fixed_test=()):
     """Whole runs to train/val/test, balanced by WINDOW count.
 
@@ -223,6 +268,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=os.path.join("ml_model", "dataset_iovnbd.pt"))
     ap.add_argument("--frame", choices=("vehicle", "earth"), default="vehicle")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--test-driver", default="",
+                    help="hold out an entire driver (A, B, D or E) as the test set")
     ap.add_argument("--debias", choices=("none", "all", "accel"), default="none",
                     help="subtract each run's stationary-mean offset")
     ap.add_argument("--fixed-test", default="",
@@ -234,14 +281,20 @@ def main(argv=None) -> int:
         print("no windows built")
         return 1
     n_runs = len(names)
-    fixed = {x.strip() for x in args.fixed_test.split(",") if x.strip()}
-    which, test_runs, val_runs = split_by_run(R, n_runs, args.seed, names, fixed)
+    if args.test_driver:
+        which, test_runs, val_runs = split_by_driver(R, n_runs, names, args.test_driver)
+    else:
+        fixed = {x.strip() for x in args.fixed_test.split(",") if x.strip()}
+        which, test_runs, val_runs = split_by_run(R, n_runs, args.seed, names, fixed)
 
     print(f"frame        : {args.frame}   debias: {args.debias}")
     print(f"windows      : {len(X):,}  shape {tuple(X.shape[1:])}")
     print(f"runs         : {n_runs}")
     print(f"  train {int((which == 0).sum()):>6}  val {int((which == 1).sum()):>6}"
           f"  test {int((which == 2).sum()):>6}   (split by run, no window overlap across it)")
+    from collections import Counter
+    drivers = Counter(driver_of(n) for n in names)
+    print(f"drivers present   : {dict(sorted(drivers.items()))}")
     print(f"held-out val runs : {[names[i] for i in val_runs]}")
     print(f"held-out test runs: {[names[i] for i in test_runs]}")
     print()
