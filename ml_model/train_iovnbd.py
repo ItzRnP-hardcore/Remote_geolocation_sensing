@@ -55,17 +55,22 @@ STRIDE = 50           # samples between consecutive window ends; see build_datas
 FWD, LAT = 0, 1       # vehicle-frame accelerometer channels
 
 
-def gaussian_nll(mu, logvar, target):
+def gaussian_nll(mu, logvar, target, w=None):
     """Negative log-likelihood with the model's own predicted variance.
 
     This is what the logvar head is for: a bare MSE would make it dead weight, and the
     variance is what gates the fusion gain in IMUModelRunner.fusionWeight.
     """
-    return 0.5 * (logvar + (target - mu) ** 2 / torch.exp(logvar)).mean()
+    per = 0.5 * (logvar + (target - mu) ** 2 / torch.exp(logvar))
+    if w is None:
+        return per.mean()
+    # Normalised so the effective learning rate does not fall just because the
+    # weights are small.
+    return (per * w).sum() / w.sum().clamp_min(1e-6)
 
 
-def data_loss(out, y):
-    speed = gaussian_nll(out["mu"], out["logvar"], y[:, 0])
+def data_loss(out, y, w=None):
+    speed = gaussian_nll(out["mu"], out["logvar"], y[:, 0], w)
     stationary = F.binary_cross_entropy_with_logits(out["stationary_logit"], y[:, 1])
     yaw = F.mse_loss(out["yaw_rate"], y[:, 2])
     return speed + stationary + yaw, speed.item(), yaw.item()
@@ -168,6 +173,7 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
                   tag="", widths=(64, 128, 256, 512), blocks=2, dropout=0.0,
                   weight_decay=0.0, augment_kinds=()):
     Xs_tr, Xr_tr, Y_tr, nxt_tr = data["train"]
+    W_tr = data.get("train_w")
     Xs_va, Xr_va, Y_va, _ = data["val"]
     Xs_te, Xr_te, Y_te, _ = data["test"]
     mean_speed = data["mean_speed"]
@@ -195,13 +201,14 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
         for i in range(0, n - 1, 64):
             idx = perm[i:i + 64]
             yb = Y_tr[idx]
+            wb = W_tr[idx] if W_tr is not None else None
             if augment_kinds:
                 raw = augment(Xr_tr[idx], augment_kinds, gen)
                 xb = (raw - data["norm_mean"]) / data["norm_sd"]
             else:
                 raw, xb = Xr_tr[idx], Xs_tr[idx]
             out = model(xb)
-            loss, _, _ = data_loss(out, yb)
+            loss, _, _ = data_loss(out, yb, wb)
 
             kin = torch.tensor(0.0)
             if weight_kin > 0:
@@ -257,6 +264,8 @@ def main(argv=None) -> int:
     ap.add_argument("--blocks", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--weight-decay", type=float, default=0.0)
+    ap.add_argument("--weight-by-quality", action="store_true",
+                    help="weight each window by its run's frame-estimate quality")
     ap.add_argument("--augment", default="",
                     help="comma-separated: rot, gain, noise")
     ap.add_argument("--w-kin", type=float, default=0.05)
@@ -293,6 +302,8 @@ def main(argv=None) -> int:
         nxt = np.where(nxt >= 0, remap[np.clip(nxt, 0, None)], -1)
         packs[key] = (Xs[m], X[m], Y[m], torch.tensor(nxt))
     packs["mean_speed"] = Y[tr][:, 0].mean()
+    if args.weight_by_quality and "weights" in d:
+        packs["train_w"] = d["weights"][tr]
     packs["norm_mean"] = mu_c
     packs["norm_sd"] = sd_c
     print(f"train {len(packs['train'][0])}  val {len(packs['val'][0])}  "
