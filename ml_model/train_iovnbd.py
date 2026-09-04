@@ -115,12 +115,16 @@ def evaluate(model, Xs, Xr, Y, mean_speed, batch=256):
         "yaw_rmse": float(torch.sqrt(((yaw - yr) ** 2).mean())),
         "yaw_corr": float(np.corrcoef(yaw.numpy(), yr.numpy())[0, 1]),
         "mean_sigma": float(torch.exp(0.5 * lv).mean()),
+        # sd(prediction)/sd(truth). Well under 1 is hedging toward the mean, which is
+        # what this model does on unseen sessions.
+        "shrinkage": float(mu.std() / sp.std()) if float(sp.std()) > 0 else float("nan"),
         "centripetal_resid": float(centripetal_residual(mu, yaw, Xr).mean()),
     }
 
 
 def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
-                  tag="", widths=(64, 128, 256, 512), blocks=2, dropout=0.0):
+                  tag="", widths=(64, 128, 256, 512), blocks=2, dropout=0.0,
+                  weight_decay=0.0):
     Xs_tr, Xr_tr, Y_tr, nxt_tr = data["train"]
     Xs_va, Xr_va, Y_va, _ = data["val"]
     Xs_te, Xr_te, Y_te, _ = data["test"]
@@ -130,7 +134,9 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
     np.random.seed(seed)
     model = ResNet1D(widths=tuple(widths), blocks_per_stage=blocks,
                      dropout=dropout)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    # AdamW rather than Adam: with weight decay > 0 the two differ, and Adam's
+    # coupling of decay into the adaptive step is the wrong behaviour here.
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
     n = len(Xs_tr)
@@ -184,9 +190,11 @@ def train_variant(name, weight_kin, weight_cen, data, epochs, lr, seed, out_dir,
     model.load_state_dict(best[1])
     te = evaluate(model, Xs_te, Xr_te, Y_te, mean_speed)
     va = evaluate(model, Xs_va, Xr_va, Y_va, mean_speed)
+    tr = evaluate(model, Xs_tr, Xr_tr, Y_tr, mean_speed)
     torch.save(model.state_dict(), os.path.join(out_dir, f"model_{name}{tag}.pth"))
     return {"variant": name, "best_epoch": best[2], "minutes": (time.time() - t0) / 60,
-            "val": va, "test": te, "history": history}
+            "params": sum(p.numel() for p in model.parameters()),
+            "train": tr, "val": va, "test": te, "history": history}
 
 
 def main(argv=None) -> int:
@@ -200,6 +208,7 @@ def main(argv=None) -> int:
                     help="channel widths per stage; shrink to cut capacity")
     ap.add_argument("--blocks", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--w-kin", type=float, default=0.05)
     ap.add_argument("--w-cen", type=float, default=0.05)
     ap.add_argument("--out", default="ml_model")
@@ -262,17 +271,19 @@ def main(argv=None) -> int:
         widths = tuple(int(x) for x in args.widths.split(","))
         results.append(train_variant(name, wk, wc, packs, args.epochs, args.lr,
                                      args.seed, args.out, args.tag, widths,
-                                     args.blocks, args.dropout))
+                                     args.blocks, args.dropout, args.weight_decay))
         print()
 
-    print(f"{'variant':<14}{'val RMSE':>10}{'test RMSE':>11}{'const':>9}"
-          f"{'test MAE':>10}{'corr':>7}{'yaw RMSE':>10}{'yaw r':>7}{'min':>7}")
-    print("-" * 85)
+    print(f"{'variant':<14}{'params':>10}{'train':>8}{'val':>8}{'test':>8}{'gap x':>7}"
+          f"{'const':>8}{'corr':>7}{'shrink':>8}{'yaw r':>7}{'min':>6}")
+    print("-" * 95)
     for r in results:
-        t = r["test"]
-        print(f"{r['variant']:<14}{r['val']['speed_rmse']:>10.3f}{t['speed_rmse']:>11.3f}"
-              f"{t['constant_rmse']:>9.3f}{t['speed_mae']:>10.3f}{t['speed_corr']:>7.3f}"
-              f"{t['yaw_rmse']:>10.4f}{t['yaw_corr']:>7.3f}{r['minutes']:>7.1f}")
+        t, tr_ = r["test"], r.get("train", {})
+        gap = t["speed_rmse"] / tr_["speed_rmse"] if tr_.get("speed_rmse") else float("nan")
+        print(f"{r['variant']:<14}{r.get('params', 0):>10,}{tr_.get('speed_rmse', float('nan')):>8.3f}"
+              f"{r['val']['speed_rmse']:>8.3f}{t['speed_rmse']:>8.3f}{gap:>7.1f}"
+              f"{t['constant_rmse']:>8.3f}{t['speed_corr']:>7.3f}"
+              f"{t.get('shrinkage', float('nan')):>8.3f}{t['yaw_corr']:>7.3f}{r['minutes']:>6.1f}")
 
     base = results[0]["test"]["speed_rmse"]
     print()
