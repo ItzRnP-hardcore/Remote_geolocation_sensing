@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legend swatch mirroring the GPS polyline: solid. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="line">
+    <stroke android:width="3dp" android:color="@color/track" />
+    <size android:width="26dp" android:height="10dp" />
+</shape>

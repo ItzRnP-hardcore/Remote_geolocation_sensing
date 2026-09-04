@@ -52,6 +52,54 @@ object MapsforgeSource {
             ?.sortedBy { it.name }
             ?: emptyList()
 
+    /** What the header of one installed map says about it. */
+    data class MapInfo(
+        val file: File,
+        val bounds: BoundingBox,
+        /** When the OSM data in the file was extracted, epoch milliseconds. */
+        val dataDateMs: Long,
+        val sizeBytes: Long,
+    ) {
+        fun contains(lat: Double, lon: Double): Boolean = bounds.contains(lat, lon)
+    }
+
+    private val infoCache = HashMap<String, MapInfo>()
+
+    /**
+     * Read a map's header. Only the header: a few hundred bytes from the front of the file, so it
+     * is cheap enough to call from the UI, and the result is cached against the file's size and
+     * mtime so a re-download of the same zone invalidates it.
+     */
+    @Synchronized
+    fun info(file: File): MapInfo? {
+        val key = "${file.absolutePath}:${file.length()}:${file.lastModified()}"
+        infoCache[key]?.let { return it }
+        val info = try {
+            val mapFile = org.mapsforge.map.reader.MapFile(file)
+            try {
+                val header = mapFile.mapFileInfo
+                val b = header.boundingBox
+                MapInfo(
+                    file = file,
+                    bounds = BoundingBox(b.maxLatitude, b.maxLongitude, b.minLatitude, b.minLongitude),
+                    dataDateMs = header.mapDate,
+                    sizeBytes = file.length(),
+                )
+            } finally {
+                mapFile.close()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Cannot read header of ${file.name}", e)
+            null
+        }
+        if (info != null) infoCache[key] = info
+        return info
+    }
+
+    /** The installed map whose extent contains the position, or null if none does. */
+    fun covering(context: Context, lat: Double, lon: Double): MapInfo? =
+        mapFiles(context).asSequence().mapNotNull { info(it) }.firstOrNull { it.contains(lat, lon) }
+
     /**
      * Points [map] at the on-device vector maps, returning the area they cover so the caller can
      * frame it. Returns null when there are none, leaving the caller to fall back to raster tiles.

@@ -297,6 +297,9 @@ class SensorService : Service() {
     private var roadNetwork: RoadNetwork? = null
     private var mapMatcher: MapMatcher? = null
 
+    /** Which file the matcher is running against, surfaced in the status so the UI can say so. */
+    @Volatile private var matchMapName: String? = null
+
     /**
      * Along-road tracking, used instead of the matcher once the integrator has drifted far enough
      * to be worth overriding rather than nudging. Owned by the matcher thread like the other two.
@@ -346,6 +349,7 @@ class SensorService : Service() {
                 if (net.open()) {
                     roadNetwork = net
                     mapMatcher = MapMatcher(net)
+                    matchMapName = maps.first().name
                     Log.i(TAG, "Map matching ready against ${maps.first().name}")
                 }
             }
@@ -624,6 +628,7 @@ class SensorService : Service() {
             running = true,
             sessionId = sessionId,
             sessionPath = dir.absolutePath,
+            matchMap = matchMapName,
         )
     }
 
@@ -896,6 +901,7 @@ class SensorService : Service() {
             snapRoadClass = snapRoadClass,
             snapConfidence = snapConfidence,
             headingCorrectionDeg = headingCorrectionDeg,
+            matchMap = matchMapName,
             drSpeedMps = deadReckoner.speed,
             mlMu = mlMu,
             mlStationaryProbability =

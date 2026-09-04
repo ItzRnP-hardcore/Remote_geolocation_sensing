@@ -27,6 +27,18 @@
             android:layout_marginTop="2dp"
             android:textColor="@color/on_overlay_secondary"
             android:textSize="12sp" />
+
+        <!-- Only shown while a transfer or an install is in flight. -->
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/zoneProgress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:visibility="gone"
+            app:indicatorColor="@color/action_record"
+            app:trackColor="@color/overlay_stroke_strong"
+            app:trackCornerRadius="2dp"
+            app:trackThickness="4dp" />
     </LinearLayout>
 
     <com.google.android.material.button.MaterialButton

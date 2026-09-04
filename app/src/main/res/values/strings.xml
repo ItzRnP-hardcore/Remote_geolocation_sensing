@@ -35,6 +35,15 @@
     <string name="download">Download</string>
     <string name="installed">Installed</string>
     <string name="installing">Installing…</string>
+    <string name="advanced_collapsed">Advanced  ▾</string>
+    <string name="advanced_expanded">Advanced  ▴</string>
+    <string name="raster_tiles_hint">Only used when no vector map is installed. Needs a tile server whose terms allow caching.</string>
+    <string name="empty_title">No offline map yet</string>
+    <string name="empty_body">Download a region and the roads appear here. Downloads continue while the app is closed.</string>
+    <string name="empty_action">Download a map</string>
+    <string name="view_map">View</string>
+    <string name="coverage_none">No offline map covers this position</string>
+    <string name="match_off">Map matching off · no offline map</string>
     <string name="cancel">Cancel</string>
     <string name="delete">Delete</string>
     <string name="show_panel">Show session panel</string>

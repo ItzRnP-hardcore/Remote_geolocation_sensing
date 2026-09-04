@@ -72,6 +72,9 @@ data class LoggerStatus(
     /** Cumulative degrees the map has rotated the integrator's course this session. */
     val headingCorrectionDeg: Double = 0.0,
 
+    /** Name of the Mapsforge file the matcher opened, or null when matching is disabled. */
+    val matchMap: String? = null,
+
     /** Ground distance covered so far, from GNSS. The denominator of the benchmark. */
     val distanceMetres: Double = 0.0,
 

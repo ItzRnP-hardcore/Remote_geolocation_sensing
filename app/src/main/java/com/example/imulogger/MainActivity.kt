@@ -117,6 +117,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnSettings.setOnClickListener { showSettings() }
+        binding.btnEmptyDownload.setOnClickListener { showSettings() }
+        binding.tvEmptyPath.text = "Or drop a .map file into " + OfflineMaps.baseDir(this).absolutePath
 
         binding.btnTheme.setOnClickListener {
             MapsforgeSource.setNight(this, !MapsforgeSource.isNight(this))
@@ -589,12 +591,7 @@ class MainActivity : AppCompatActivity() {
         val vector = MapsforgeSource.mapFiles(this)
         // Only a hard-offline map with nothing on disk is actually blank; online mode can fetch.
         val blank = offline && archives.isEmpty() && vector.isEmpty()
-        binding.tvNoTiles.visibility = if (blank) android.view.View.VISIBLE else android.view.View.GONE
-        if (blank) {
-            binding.tvNoTiles.text =
-                "No offline map on this device.\n\nOpen Settings to download a region, " +
-                    "or drop a .map / .mbtiles file into\n" + OfflineMaps.baseDir(this).absolutePath
-        }
+        binding.cardEmpty.visibility = if (blank) android.view.View.VISIBLE else android.view.View.GONE
     }
 
     /** Rebuild the tile provider after the theme or the set of installed maps changed. */
@@ -634,15 +631,64 @@ class MainActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed || !::binding.isInitialized) return@runOnUiThread
                 if (promoted.isNotEmpty()) {
                     reattachMap()
-                    Toast.makeText(
-                        this,
-                        "Offline map installed: " + promoted.joinToString { it.label.substringBefore(" (") },
-                        Toast.LENGTH_LONG,
-                    ).show()
+                    announceInstalled(promoted)
                 }
                 settingsRefresh?.invoke()
             }
         }, "map-install").start()
+    }
+
+    /**
+     * Say which zones landed and offer to look at them. The map only reframes itself when there
+     * is nothing else to show, so after a download during a session the new region would
+     * otherwise be installed but invisible.
+     */
+    private fun announceInstalled(zones: List<MapDownloader.Zone>) {
+        val bounds = zones
+            .mapNotNull { MapsforgeSource.info(MapDownloader.installedFile(this, it))?.bounds }
+        val bar = com.google.android.material.snackbar.Snackbar.make(
+            binding.root,
+            "Offline map installed: " + zones.joinToString { it.shortLabel },
+            com.google.android.material.snackbar.Snackbar.LENGTH_LONG,
+        )
+        bar.anchorView = binding.fabCentre
+        if (bounds.isNotEmpty()) {
+            bar.setAction(R.string.view_map) {
+                followPosition = false
+                val union = org.osmdroid.util.BoundingBox(
+                    bounds.maxOf { it.latNorth }, bounds.maxOf { it.lonEast },
+                    bounds.minOf { it.latSouth }, bounds.minOf { it.lonWest },
+                )
+                binding.map.zoomToBoundingBox(union, true)
+            }
+        }
+        bar.show()
+        updateCoverageHint(SensorService.status.value)
+    }
+
+    /**
+     * Warn when the position is known but no installed map contains it. This is the confusion
+     * the app used to leave unexplained: the GNSS chip says "good", the map says nothing.
+     */
+    private fun updateCoverageHint(status: LoggerStatus) {
+        val chip = binding.chipCoverage
+        val here = when {
+            status.lastLat != null && status.lastLon != null -> GeoPoint(status.lastLat, status.lastLon)
+            ::locationOverlay.isInitialized -> locationOverlay.myLocation
+            else -> null
+        }
+        if (here == null || MapsforgeSource.covering(this, here.latitude, here.longitude) != null) {
+            chip.visibility = android.view.View.GONE
+            return
+        }
+        val zone = MapDownloader.suggestZone(here.latitude, here.longitude)
+            ?.takeIf { !MapDownloader.isInstalled(this, it) }
+        chip.text = if (zone != null) "No offline map here · Download ${zone.shortLabel} zone"
+        else getString(R.string.coverage_none)
+        chip.setOnClickListener {
+            if (zone != null) confirmDownload(zone) { showSettings() } else showSettings()
+        }
+        chip.visibility = android.view.View.VISIBLE
     }
 
     // ------------------------------------------------------------------ settings
@@ -657,6 +703,14 @@ class MainActivity : AppCompatActivity() {
         swOffline.setOnCheckedChangeListener { _, checked ->
             offline = checked
             reattachMap()
+        }
+
+        val advanced = view.findViewById<android.view.View>(R.id.advancedGroup)
+        val btnAdvanced = view.findViewById<android.widget.TextView>(R.id.btnAdvanced)
+        btnAdvanced.setOnClickListener {
+            val open = advanced.visibility != android.view.View.VISIBLE
+            advanced.visibility = if (open) android.view.View.VISIBLE else android.view.View.GONE
+            btnAdvanced.setText(if (open) R.string.advanced_expanded else R.string.advanced_collapsed)
         }
 
         view.findViewById<android.widget.Button>(R.id.btnTileSource).setOnClickListener {
@@ -704,6 +758,7 @@ class MainActivity : AppCompatActivity() {
             val name = row.findViewById<android.widget.TextView>(R.id.zoneName)
             val status = row.findViewById<android.widget.TextView>(R.id.zoneStatus)
             val action = row.findViewById<com.google.android.material.button.MaterialButton>(R.id.zoneAction)
+            val bar = row.findViewById<com.google.android.material.progressindicator.LinearProgressIndicator>(R.id.zoneProgress)
 
             name.text = zone.label
             val installed = MapDownloader.isInstalled(this, zone)
@@ -716,14 +771,23 @@ class MainActivity : AppCompatActivity() {
                     status.text = getString(R.string.installing)
                     action.text = getString(R.string.installing)
                     action.isEnabled = false
+                    // Verifying and moving: no byte count to show, so an indeterminate bar.
+                    // Mode must be set before the bar becomes visible or Material throws.
+                    bar.isIndeterminate = true
+                    bar.visibility = android.view.View.VISIBLE
                 }
                 progress != null && progress.running -> {
-                    status.text = String.format(
+                    val sized = progress.bytesTotal > 0
+                    status.text = if (sized) String.format(
                         Locale.US, "%d%%  %d / %d MB",
                         progress.percent,
                         progress.bytesDone / 1_048_576,
                         progress.bytesTotal / 1_048_576,
-                    )
+                    ) else if (progress.status == DownloadManager.STATUS_PAUSED) "Paused, waiting for network"
+                    else "Starting…"
+                    bar.isIndeterminate = !sized
+                    bar.visibility = android.view.View.VISIBLE
+                    if (sized) bar.setProgressCompat(progress.percent, false)
                     action.text = getString(R.string.cancel)
                     action.setOnClickListener {
                         MapDownloader.cancel(this, zone)
@@ -731,8 +795,14 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 installed -> {
-                    installedBytes += MapDownloader.installedFile(this, zone).length()
-                    status.text = getString(R.string.installed)
+                    val file = MapDownloader.installedFile(this, zone)
+                    installedBytes += file.length()
+                    val info = MapsforgeSource.info(file)
+                    status.text = if (info != null) String.format(
+                        Locale.US, "Installed · %d MB · OSM data %s",
+                        info.sizeBytes / 1_048_576,
+                        java.text.SimpleDateFormat("d MMM yyyy", Locale.US).format(java.util.Date(info.dataDateMs)),
+                    ) else getString(R.string.installed)
                     status.setTextColor(ContextCompat.getColor(this, R.color.quality_good))
                     action.text = getString(R.string.delete)
                     action.setOnClickListener { confirmDelete(zone) { refreshRows(list, storage) } }
@@ -878,6 +948,15 @@ class MainActivity : AppCompatActivity() {
         )
 
         maybeAutoPrefetch(status)
+        updateCoverageHint(status)
+
+        binding.tvMatchSource.text = when {
+            status.running && status.matchMap != null -> "Map matching · ${status.matchMap}"
+            status.running -> getString(R.string.match_off)
+            else -> MapsforgeSource.mapFiles(this).firstOrNull()
+                ?.let { "Map matching will use ${it.name}" }
+                ?: getString(R.string.match_off)
+        }
 
         binding.legendGps.setTextColor(ContextCompat.getColor(this, R.color.track))
         binding.legendImu.setTextColor(ContextCompat.getColor(this, R.color.track_imu))

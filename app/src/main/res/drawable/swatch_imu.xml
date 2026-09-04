@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legend swatch mirroring the IMU polyline: dashed, so the two tracks stay distinguishable
+     without relying on colour alone. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="line">
+    <stroke
+        android:width="3dp"
+        android:color="@color/track_imu"
+        android:dashGap="3dp"
+        android:dashWidth="5dp" />
+    <size android:width="26dp" android:height="10dp" />
+</shape>

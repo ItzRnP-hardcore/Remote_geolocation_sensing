@@ -36,7 +36,28 @@ object MapDownloader {
     /** Every Mapsforge `.map` file starts with this; a truncated or error-page download will not. */
     private val MAGIC = "mapsforge binary OSM".toByteArray(Charsets.US_ASCII)
 
-    data class Zone(val id: String, val label: String, val approxMb: Int)
+    /**
+     * One downloadable region. The extent is a rough lat/lon box around the zone, good enough
+     * to say "you are probably in the Northern zone" before anything is installed; the real
+     * coverage comes from the file header once it is on disk.
+     */
+    data class Zone(
+        val id: String,
+        val label: String,
+        val approxMb: Int,
+        val south: Double,
+        val west: Double,
+        val north: Double,
+        val east: Double,
+    ) {
+        /** "Eastern" rather than "Eastern (WB, Jharkhand, ...)" for toasts and chips. */
+        val shortLabel: String get() = label.substringBefore(" (")
+
+        fun roughlyContains(lat: Double, lon: Double): Boolean =
+            lat in south..north && lon in west..east
+
+        val roughAreaDeg2: Double get() = (north - south) * (east - west)
+    }
 
     /**
      * Mapsforge splits India into zones rather than states. Sizes are from the server and drift
@@ -44,13 +65,21 @@ object MapDownloader {
      * download starts, not to validate anything.
      */
     val INDIA_ZONES = listOf(
-        Zone("eastern-zone", "Eastern (WB, Jharkhand, Odisha, Bihar)", 210),
-        Zone("northern-zone", "Northern (Delhi, UP, Punjab, Rajasthan)", 205),
-        Zone("western-zone", "Western (Maharashtra, Gujarat, Goa)", 203),
-        Zone("central-zone", "Central (MP, Chhattisgarh)", 313),
-        Zone("southern-zone", "Southern (KA, TN, KL, AP, TS)", 520),
-        Zone("north-eastern-zone", "North-eastern (Assam and the seven sisters)", 112),
+        Zone("eastern-zone", "Eastern (WB, Jharkhand, Odisha, Bihar)", 210, 17.7, 83.0, 27.6, 89.9),
+        Zone("northern-zone", "Northern (Delhi, UP, Punjab, Rajasthan)", 205, 23.0, 68.0, 37.1, 84.7),
+        Zone("western-zone", "Western (Maharashtra, Gujarat, Goa)", 203, 14.8, 68.1, 24.7, 80.9),
+        Zone("central-zone", "Central (MP, Chhattisgarh)", 313, 17.7, 74.0, 26.9, 84.4),
+        Zone("southern-zone", "Southern (KA, TN, KL, AP, TS)", 520, 6.7, 74.0, 19.9, 84.8),
+        Zone("north-eastern-zone", "North-eastern (Assam and the seven sisters)", 112, 21.9, 88.0, 29.5, 97.4),
     )
+
+    /**
+     * The zone most likely to cover a position. The rough boxes overlap at the borders, so the
+     * smallest matching one wins: a point in Bihar is inside both the Northern and Eastern
+     * boxes, and Eastern is the tighter fit.
+     */
+    fun suggestZone(lat: Double, lon: Double): Zone? =
+        INDIA_ZONES.filter { it.roughlyContains(lat, lon) }.minByOrNull { it.roughAreaDeg2 }
 
     fun installedFile(context: Context, zone: Zone): File =
         File(OfflineMaps.baseDir(context), "${zone.id}.map")
