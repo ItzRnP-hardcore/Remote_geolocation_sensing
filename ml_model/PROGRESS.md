@@ -91,6 +91,40 @@ per-session offset calibration (30 s drift 20.5% to 16.0%).
 Recommended default: **dropout 0.3 + rotation augmentation**, for the bias reduction
 rather than for RMSE.
 
+## Leave-one-driver-out: the honest generalisation numbers
+
+Holding out a whole driver rather than a journey, so the test shares no vehicle, phone,
+mounting or route with training.
+
+| fold | runs held out | base test | d3rot test | constant | base beats constant |
+|---|---|---|---|---|---|
+| A | 6 (S\*) | 5.396 | **4.328** | 6.559 | 17.7% |
+| B | 3 (M\*) | **3.913** | 4.631 | 5.683 | 31.1% |
+| D | 1 (Y\*) | **4.221** | 4.743 | 5.334 | 20.9% |
+| E | 16 (V\*) | **9.114** | 9.351 | 9.985 | 8.7% |
+| **mean** | | **5.661** | 5.763 | 6.890 | **17.8%** |
+
+Three things this settles.
+
+**The journey split was optimistic by about 15%.** Cross-driver test RMSE is 5.661
+against 4.919 on the journey split, and the margin over a constant falls from 28.7% to
+17.8%. The earlier numbers were partly measuring familiar roads, exactly as the 46-50%
+bounding-box overlap suggested.
+
+**The model does still generalise.** Every fold beats its constant baseline, so it is
+reading something real from the IMU rather than only memorising sessions.
+
+**Dropout plus rotation does NOT transfer across drivers.** It wins one fold of four,
+by a lot (A: 5.396 to 4.328, -19.8%), and loses the other three, for a mean 1.8% worse.
+Its confirmed benefit was bias reduction on the journey split; that does not survive a
+change of vehicle. It should not be adopted as a default on this evidence.
+
+**Driver E is the hard case** - 8.7% over constant against 31.1% for driver B. E is the
+16 loosely-mounted runs, which is consistent with everything else measured about them.
+
+Per-fold bias also swings sign by driver: A -1.678, B +1.051, D +1.603, E -5.091. The
+opposite-sign per-session bias is a cross-vehicle effect, not a quirk of two runs.
+
 ## The central finding (2026-09-04)
 
 The model is **massively overfitting**, not data-limited. On the 10-run set:
