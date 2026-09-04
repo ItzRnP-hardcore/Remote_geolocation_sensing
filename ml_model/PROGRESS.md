@@ -24,6 +24,30 @@ Reference points on that set:
 | 3 | + kinematic loss `v_t = v_{t-1} + a·dt` | same | 0 | 4.969 / 5.063 / 6.030 at w = 0.01 / 0.05 / 0.2 | **hurts monotonically**; refutes the execution plan's constraint |
 | 4 | 2× data (yaw gate relaxed) | 19.9 h, 26 runs, 8,804 train windows | 0,1,2 | *running* | — |
 
+## The central finding (2026-09-04)
+
+The model is **massively overfitting**, not data-limited. On the 10-run set:
+
+| split | RMSE | corr | sd(pred)/sd(truth) |
+|---|---|---|---|
+| train | **0.396** | 0.999 | 0.968 |
+| val | 2.796 | 0.865 | 0.913 |
+| test | **4.877** | 0.739 | **0.629** |
+
+A 12x train-to-test gap with train correlation 0.999 means it has memorised the
+training windows. 3,848,196 parameters against 4,949 training windows is ~778 per
+example. The per-run bias that looked like a calibration problem is the downstream
+symptom: on an unseen session the model falls back toward the training mean, which
+is why bias correlates -0.818 with a run's mean speed and why test shrinkage drops
+to 0.629.
+
+Two hypotheses were tested and rejected before landing here: the mounting-rotation
+estimate (bias correlates only +0.28 with frame quality, and a better angle
+estimator made it worse) and irreducible observability (ruled out by the near-perfect
+train fit).
+
+So the levers are capacity, regularisation and data - in that order - not features.
+
 ## What is queued
 
 1. **(running)** Does doubling the data help? Experiment 4.
