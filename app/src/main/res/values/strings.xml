@@ -48,4 +48,45 @@
     <string name="delete">Delete</string>
     <string name="show_panel">Show session panel</string>
     <string name="hide_panel">Hide session panel</string>
+    <string name="session_history">Session History</string>
+    <string name="session_history_hint">Review previous drives, GPS vs IMU tracks, and road matching</string>
+    <string name="no_sessions_found">No recorded sessions found</string>
+    <string name="no_sessions_hint">Start a recording session first. Saved sessions will appear here.</string>
+    <string name="exit_history">Exit History</string>
+    <string name="viewing_history">Viewing History</string>
+    <string name="track_layers">Layers</string>
+    <string name="heading_up_mode">Heading-Up</string>
+    <string name="north_up_mode">North-Up</string>
+    <string name="heading_up_title">Heading-Up map rotation</string>
+    <string name="heading_up_desc">Rotates the map so your heading points UP and keeps position centered</string>
+    
+    <!-- Calibration & Compass Verification Strings -->
+    <string name="calibration_title">Magnetometer Calibration</string>
+    <string name="calibration_subtitle">Orient compass before recording</string>
+    <string name="swirl_instruction">Swirl phone in a figure-8 (∞) path</string>
+    <string name="swirl_hint">Move the handset smoothly through a figure-8 loop to calibrate the 3D magnetometer sensor.</string>
+    <string name="accuracy_uncalibrated">Sensor status: Uncalibrated</string>
+    <string name="accuracy_low">Sensor status: Low accuracy</string>
+    <string name="accuracy_medium">Sensor status: Medium accuracy</string>
+    <string name="accuracy_high">Sensor status: High accuracy (Calibrated)</string>
+    <string name="compass_verify_question">Is the magnetometer heading accurate?</string>
+    <string name="compass_verify_hint">Inside a car, magnetic interference from the vehicle body can distort compass yaw. If mounted in a car, Gyro/Model Yaw is recommended.</string>
+    <string name="use_magnetometer_truth">Yes — Use Magnetometer as Truth</string>
+    <string name="use_gyro_model_truth">No — Use Gyro / Model Yaw Head</string>
+    
+    <!-- Settings Toggles -->
+    <string name="magnetometer_yaw_title">Magnetometer Absolute Yaw</string>
+    <string name="magnetometer_yaw_desc">Use compass magnetometer as absolute heading truth. Disable when inside vehicles to prevent magnetic distortion.</string>
+    <string name="vehicle_mode_title">Vehicle Kinematics (Fixed Phone)</string>
+    <string name="vehicle_mode_desc">Applies Non-Holonomic Constraint (NHC) forward-only tracking to eliminate centripetal turn drift.</string>
+    <string name="model_yaw_head_title">ML Model Yaw Head</string>
+    <string name="model_yaw_head_desc">Use trained neural network yaw head for heading truth source during GNSS outages.</string>
+    
+    <!-- Navigation Strings -->
+    <string name="search_destination">Search destination or place…</string>
+    <string name="destination">Destination</string>
+    <string name="clear_navigation">Clear Route</string>
+    <string name="route_calculating">Finding shortest path…</string>
+    <string name="route_found">Route calculated</string>
+    <string name="no_route_found">No road path found</string>
 </resources>

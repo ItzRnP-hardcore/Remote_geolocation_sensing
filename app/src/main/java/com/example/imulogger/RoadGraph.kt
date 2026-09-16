@@ -226,4 +226,113 @@ class RoadGraph(val segments: List<RoadNetwork.Segment>) {
         val dy = (bLat - aLat) * M_PER_DEG_LAT
         return sqrt(dx * dx + dy * dy)
     }
+
+    class RouteResult(val points: List<TrackPoint>, val distanceM: Double)
+
+    /**
+     * Find shortest drivable road path between two coordinates using A* search.
+     */
+    fun findPath(
+        startLat: Double, startLon: Double,
+        destLat: Double, destLon: Double,
+        snapRadiusM: Double = 500.0,
+    ): RouteResult? {
+        val startState = nearestState(startLat, startLon, null, snapRadiusM) ?: return null
+        val destState = nearestState(destLat, destLon, null, snapRadiusM) ?: return null
+
+        if (startState.segment == destState.segment && startState.direction == destState.direction) {
+            val pts = listOf(
+                pointAt(startState.segment, startState.offsetM, startState.direction),
+                pointAt(destState.segment, destState.offsetM, destState.direction),
+            )
+            val d = abs(destState.offsetM - startState.offsetM)
+            return RouteResult(pts, d)
+        }
+
+        fun pack(segment: Int, direction: Int): Int = (segment shl 1) or (if (direction > 0) 0 else 1)
+        fun unpackSeg(packed: Int): Int = packed shr 1
+        fun unpackDir(packed: Int): Int = if ((packed and 1) == 0) 1 else -1
+
+        val destPoint = pointAt(destState.segment, destState.offsetM, destState.direction)
+
+        class Node(val packed: Int, val g: Double, val f: Double) : Comparable<Node> {
+            override fun compareTo(other: Node): Int = f.compareTo(other.f)
+        }
+
+        val open = java.util.PriorityQueue<Node>()
+        val gScore = HashMap<Int, Double>()
+        val cameFrom = HashMap<Int, Int>()
+
+        val startPacked = pack(startState.segment, startState.direction)
+        val initialCost = lengthsM[startState.segment] - startState.offsetM
+        gScore[startPacked] = initialCost
+        open.add(Node(startPacked, initialCost, initialCost + metres(startLat, startLon, destPoint.lat, destPoint.lon)))
+
+        var targetReached: Int? = null
+
+        while (open.isNotEmpty()) {
+            val curr = open.poll() ?: break
+            val seg = unpackSeg(curr.packed)
+            val dir = unpackDir(curr.packed)
+
+            if (seg == destState.segment) {
+                targetReached = curr.packed
+                break
+            }
+
+            if (curr.g > (gScore[curr.packed] ?: Double.MAX_VALUE)) continue
+
+            for (succ in successors(seg, dir)) {
+                val nextPacked = pack(succ.segment, succ.direction)
+                val edgeLen = lengthsM[succ.segment]
+                val turnCost = succ.turnDeg * TURN_PENALTY_PER_DEG
+                val tentativeG = curr.g + edgeLen + turnCost
+                if (tentativeG < (gScore[nextPacked] ?: Double.MAX_VALUE)) {
+                    gScore[nextPacked] = tentativeG
+                    cameFrom[nextPacked] = curr.packed
+                    val pt = if (succ.direction > 0) TrackPoint(segments[succ.segment].bLat, segments[succ.segment].bLon)
+                             else TrackPoint(segments[succ.segment].aLat, segments[succ.segment].aLon)
+                    val h = metres(pt.lat, pt.lon, destPoint.lat, destPoint.lon)
+                    open.add(Node(nextPacked, tentativeG, tentativeG + h))
+                }
+            }
+        }
+
+        if (targetReached == null) return null
+
+        val pathSegments = ArrayList<Int>()
+        var currSegment: Int? = targetReached
+        while (currSegment != null) {
+            pathSegments.add(currSegment)
+            currSegment = cameFrom[currSegment]
+        }
+        pathSegments.reverse()
+
+        val points = ArrayList<TrackPoint>()
+        points.add(TrackPoint(startLat, startLon))
+        points.add(pointAt(startState.segment, startState.offsetM, startState.direction))
+
+        var totalDist = 0.0
+        for (i in pathSegments.indices) {
+            val p = pathSegments[i]
+            val seg = unpackSeg(p)
+            val dir = unpackDir(p)
+            val s = segments[seg]
+            if (i == 0) {
+                val exitPt = if (dir > 0) TrackPoint(s.bLat, s.bLon) else TrackPoint(s.aLat, s.aLon)
+                points.add(exitPt)
+                totalDist += lengthsM[seg] - startState.offsetM
+            } else if (i == pathSegments.size - 1) {
+                val destPt = pointAt(destState.segment, destState.offsetM, destState.direction)
+                points.add(destPt)
+                totalDist += destState.offsetM
+            } else {
+                val endPt = if (dir > 0) TrackPoint(s.bLat, s.bLon) else TrackPoint(s.aLat, s.aLon)
+                points.add(endPt)
+                totalDist += lengthsM[seg]
+            }
+        }
+        points.add(TrackPoint(destLat, destLon))
+        return RouteResult(points, totalDist)
+    }
 }

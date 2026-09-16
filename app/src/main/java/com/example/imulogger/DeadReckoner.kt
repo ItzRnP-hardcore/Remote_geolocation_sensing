@@ -94,6 +94,24 @@ class DeadReckoner {
     private var vN = 0.0
     private var vU = 0.0
 
+    /**
+     * Whether the device is fixed in a vehicle mount (Non-Holonomic Constraint active).
+     *
+     * In a wheeled vehicle, lateral velocity is zero (v_lat = 0) and the vehicle can only move
+     * along its forward heading axis. Forward acceleration is integrated into speed, and centripetal
+     * lateral acceleration (v * omega) rotates heading rather than sliding sideways. This prevents
+     * the "travelling leftward on right turn" error caused by unconstrained integration and sensor tilt.
+     */
+    var isPhoneFixed: Boolean = true
+
+    /** Vehicle heading in radians clockwise from North (0 = North, pi/2 = East). */
+    var headingRad: Double = 0.0
+        private set
+
+    /** Forward speed along the vehicle heading, m/s. */
+    var forwardSpeed: Double = 0.0
+        private set
+
     /** World-frame accelerometer bias, learned during stand-still. */
     private var bE = 0.0
     private var bN = 0.0
@@ -182,8 +200,8 @@ class DeadReckoner {
     val courseDeg: Double?
         get() {
             if (speed < 0.3) return null
-            val deg = Math.toDegrees(kotlin.math.atan2(vE, vN))
-            return if (deg < 0) deg + 360 else deg
+            val deg = if (isPhoneFixed) Math.toDegrees(headingRad) else Math.toDegrees(kotlin.math.atan2(vE, vN))
+            return (deg % 360.0 + 360.0) % 360.0
         }
 
     fun bias(): DoubleArray = doubleArrayOf(bE, bN, bU)
@@ -202,13 +220,6 @@ class DeadReckoner {
      * This is the whole point of map matching for this project: a road's bearing is an observation
      * of exactly the quantity the IMU cannot recover for itself.
      *
-     * Speed is left alone here because the map has nothing to say about it, NOT because it is
-     * good. Session-average speed looks competitive (3.10 m/s against GPS's 3.36 on a recorded
-     * run), but that average is flattered by the anchored stretches. Measured over free-running
-     * outages alone, this integrator accumulates about 37% less distance than was actually
-     * travelled - 74 m short over 60 s - which is now the single largest error source in the
-     * system and the reason [AlongRoadTracker] is disabled by default.
-     *
      * The road direction is ambiguous on a two-way road, so the nearer of the two is taken;
      * [gain] scales how much of the disagreement is absorbed per update. Returns the degrees
      * actually applied.
@@ -217,7 +228,7 @@ class DeadReckoner {
         val sp = speed
         if (sp < MIN_SPEED_FOR_HEADING_FIX) return 0.0
 
-        val course = Math.toDegrees(kotlin.math.atan2(vE, vN))
+        val course = if (isPhoneFixed) Math.toDegrees(headingRad) else Math.toDegrees(kotlin.math.atan2(vE, vN))
         // A road carries traffic both ways; the direction we are actually going is the one that
         // disagrees least with where we already think we are heading.
         val forward = signedDelta(roadBearingDeg, course)
@@ -225,7 +236,8 @@ class DeadReckoner {
         val delta = if (abs(forward) <= abs(backward)) forward else backward
 
         val applied = (gain * delta).coerceIn(-MAX_HEADING_STEP_DEG, MAX_HEADING_STEP_DEG)
-        val corrected = Math.toRadians(course + applied)
+        val corrected = Math.toRadians((course + applied + 360.0) % 360.0)
+        headingRad = corrected
         vE = sp * kotlin.math.sin(corrected)
         vN = sp * kotlin.math.cos(corrected)
         headingCorrectionDeg += abs(applied)
@@ -239,12 +251,34 @@ class DeadReckoner {
         return d
     }
 
+    /**
+     * Integrate a turn rate (e.g. from the ML model's yaw head or gyro z-rate).
+     * [yawRateRadS] is in rad/s, positive for clockwise / right turns (dHeading/dt).
+     */
+    fun onYawRate(yawRateRadS: Double, dt: Double) {
+        if (dt <= 0.0 || dt > 1.0) return
+        headingRad = (headingRad + yawRateRadS * dt) % (2.0 * Math.PI)
+        if (headingRad < 0.0) headingRad += 2.0 * Math.PI
+        if (isPhoneFixed && forwardSpeed > 0.0) {
+            vE = forwardSpeed * kotlin.math.sin(headingRad)
+            vN = forwardSpeed * kotlin.math.cos(headingRad)
+        }
+    }
+
     // ------------------------------------------------------------------ inputs
 
     /** Latest attitude, as the rotation-vector values straight off the sensor. */
     fun onRotationVector(values: FloatArray) {
         SensorManager.getRotationMatrixFromVector(rotation, values)
         haveRotation = true
+        // If not yet anchored by GNSS and stationary, initialize headingRad from rotation vector
+        if (!initialised && forwardSpeed < 0.3) {
+            val angles = FloatArray(3)
+            SensorManager.getOrientation(rotation, angles)
+            var az = angles[0].toDouble() // azimuth: -pi to pi
+            if (az < 0.0) az += 2.0 * Math.PI
+            headingRad = az
+        }
     }
 
     fun onGyro(x: Float, y: Float, z: Float) {
@@ -266,11 +300,6 @@ class DeadReckoner {
 
     /**
      * Copy the current device-to-world rotation out, row major. False before the first sample.
-     *
-     * Shared so the model's levelling uses the same attitude the integrator navigates on.
-     * Measured on session 20260904_195146 against GNSS bearing, the rotation vector tracks the
-     * road to 10.8 deg RMS while `getRotationMatrix(gravity, magnetometer)` manages 12.6 - and
-     * the magnetometer is the one sensor a steel vehicle actively disturbs.
      */
     fun rotationInto(out: FloatArray): Boolean {
         if (!haveRotation) return false
@@ -280,10 +309,6 @@ class DeadReckoner {
 
     /**
      * Remove the learned offset from one gyroscope sample, in place, in device axes.
-     *
-     * Exposed rather than applied internally because the integrator takes its attitude from the
-     * rotation vector and never integrates this channel itself. The consumer is the model: it is
-     * trained on `--debias all` features, so feeding it the raw channel is a train/serve skew.
      */
     fun debiasGyro(out: FloatArray, x: Float, y: Float, z: Float) {
         out[0] = (x - gbX).toFloat()
@@ -324,10 +349,6 @@ class DeadReckoner {
         var lU = aU - gravity - bU
 
         if (isStationary) {
-            // Everything left over while standing still is error, so feed it back. Learning the
-            // gravity magnitude here is what absorbs the accelerometer's scale-factor error —
-            // this device reads about 0.9% low, and a fixed 9.80665 would inject that straight
-            // into the vertical channel.
             gravity += K_GRAVITY * (norm - gravity)
             bE += K_BIAS * lE
             bN += K_BIAS * lN
@@ -335,12 +356,26 @@ class DeadReckoner {
             // Zero-velocity update: standing still means the velocity really is zero, which stops
             // the first integration from accumulating anything at all.
             vE = 0.0; vN = 0.0; vU = 0.0
+            forwardSpeed = 0.0
             lE = 0.0; lN = 0.0; lU = 0.0
-        }
+        } else if (isPhoneFixed) {
+            // Non-Holonomic Constraint (NHC) for vehicle:
+            // A vehicle cannot translate sideways (v_lateral = 0).
+            // Forward acceleration is projected along heading:
+            val sinH = kotlin.math.sin(headingRad)
+            val cosH = kotlin.math.cos(headingRad)
+            val aFwd = lE * sinH + lN * cosH
 
-        vE += lE * dt
-        vN += lN * dt
-        vU += lU * dt
+            forwardSpeed = (forwardSpeed + aFwd * dt).coerceAtLeast(0.0)
+            vE = forwardSpeed * sinH
+            vN = forwardSpeed * cosH
+            vU = 0.0
+        } else {
+            vE += lE * dt
+            vN += lN * dt
+            vU += lU * dt
+            forwardSpeed = sqrt(vE * vE + vN * vN)
+        }
 
         pE += vE * dt
         pN += vN * dt
@@ -368,7 +403,9 @@ class DeadReckoner {
         // GNSS velocity is far better than anything the accelerometer can integrate, so take it
         // whenever it is offered rather than blending.
         if (speedMps != null && bearingDeg != null) {
-            val rad = Math.toRadians(bearingDeg.toDouble())
+            forwardSpeed = speedMps.toDouble()
+            headingRad = Math.toRadians(bearingDeg.toDouble())
+            val rad = headingRad
             vE = speedMps * kotlin.math.sin(rad)
             vN = speedMps * kotlin.math.cos(rad)
         }
@@ -377,20 +414,6 @@ class DeadReckoner {
 
     /**
      * Blend a model speed estimate into the velocity magnitude, leaving direction untouched.
-     *
-     * This is the coupling the deleted `applyMLCorrection` should have been. That one took the
-     * model's mu - a speed in m/s - and passed it where this class expected degrees, then added
-     * the same offset to north and east regardless of heading, driving the estimate northeast at
-     * 45 degrees whatever way the vehicle pointed, at 10 Hz. Speed is a scalar observation of the
-     * velocity vector's magnitude and nothing else, so that is all it is allowed to touch here;
-     * the existing integration carries it into position on its own.
-     *
-     * [weight] is a scalar Kalman gain in [0, 1] formed from the model's reported variance against
-     * an assumed integrator variance - see [IMUModelRunner.fusionWeight]. A model that declares
-     * itself uncertain therefore moves the estimate less, which is the entire reason the network
-     * has a logvar head at all.
-     *
-     * Returns the m/s actually applied, signed.
      */
     fun applyModelSpeed(modelSpeedMps: Double, weight: Double): Double {
         val sp = speed
@@ -401,9 +424,15 @@ class DeadReckoner {
         val target = modelSpeedMps.coerceAtLeast(0.0)
         val blended = sp + w * (target - sp)
         val delta = blended - sp
-        val scale = blended / sp
-        vE *= scale
-        vN *= scale
+        forwardSpeed = blended
+        if (isPhoneFixed) {
+            vE = forwardSpeed * kotlin.math.sin(headingRad)
+            vN = forwardSpeed * kotlin.math.cos(headingRad)
+        } else {
+            val scale = blended / sp
+            vE *= scale
+            vN *= scale
+        }
         modelSpeedCorrectionMps += abs(delta)
         return delta
     }
@@ -412,7 +441,6 @@ class DeadReckoner {
         originLat = lat
         originLon = lon
         val phi = Math.toRadians(lat)
-        // Local metres-per-degree, good to centimetres over the tens of kilometres a session covers.
         mPerDegLat = 111_132.92 - 559.82 * cos(2 * phi) + 1.175 * cos(4 * phi)
         mPerDegLon = 111_412.84 * cos(phi) - 93.5 * cos(3 * phi)
         pE = 0.0; pN = 0.0; pU = 0.0
@@ -434,5 +462,7 @@ class DeadReckoner {
         gyroBiasValid = false
         headingCorrectionDeg = 0.0
         modelSpeedCorrectionMps = 0.0
+        headingRad = 0.0
+        forwardSpeed = 0.0
     }
 }

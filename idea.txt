@@ -1,6 +1,12 @@
+the basic idea is to do dead reckoning when the GPS isnt available. 
+
 so, i want to build an app that uses AI algorithm to sense the position of a travelling vehicle using the internal IMU of a mobile device. 
-as of now, lets build an app that gets its information from the embedded gyroscope, gps, magnetometer, and accelerometer from my samsung galaxy S21fe smartphone and using a kalman filter to track the position of the smartphone while we are moving in a vehicle and when the vehicle goes through a tunnel, then have a higher trust score with the imu but outside of the tunner trust the gps more.
 
-and an AI algorithm to snap the vehicle position to the roadmap of an offline map. 
+in second phase i want to have a better model that takes into account the data from n<4 satellites and tries to figure out an estimate of the location with those data along with the previous location data and the IMU data.
 
-so for now, lets just build the wrapper so that it extracts information from the phone and transforms it into a data that can be analysed and put into the AI algorithm on device.
+as the number of satellites increase we then try to have more trust on the satellites data.
+
+but we also have to take into account the fact that the mobile might not be placed in the same position throughout the journey. so we have to calibrate our model for that.
+
+
+so we can use a extended unscented kalman filter to get an initial estimate of the position, and then use AI algorithm to refine the estimate.

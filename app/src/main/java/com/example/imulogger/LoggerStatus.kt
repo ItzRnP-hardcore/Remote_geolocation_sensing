@@ -56,9 +56,12 @@ data class LoggerStatus(
      * against GNSS ground truth it should not be allowed to move the position estimate.
      */
     val mlMu: Float = Float.NaN,
+    val mlLogvar: Float = Float.NaN,
+    val mlYawRate: Float = Float.NaN,
     val mlStationaryProbability: Float = Float.NaN,
     val mlInferences: Long = 0,
     val mlDropped: Long = 0,
+    val drCourseDeg: Double? = null,
 
     /** Map-matched position: the dead-reckoned fix snapped onto the road network. */
     val snapLat: Double? = null,

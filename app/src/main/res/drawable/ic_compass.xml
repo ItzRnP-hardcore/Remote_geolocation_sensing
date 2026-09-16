@@ -1,0 +1,19 @@
+﻿<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Dial ring -->
+    <path
+        android:strokeColor="@color/on_overlay_secondary"
+        android:strokeWidth="1.5"
+        android:pathData="M12,2A10,10 0 1,0 12,22A10,10 0 1,0 12,2Z" />
+    <!-- North arrow needle (red) -->
+    <path
+        android:fillColor="#E53935"
+        android:pathData="M12,4 L15,12 L12,10 L9,12 Z" />
+    <!-- South arrow needle (muted secondary) -->
+    <path
+        android:fillColor="@color/on_overlay_secondary"
+        android:pathData="M12,20 L15,12 L12,10 L9,12 Z" />
+</vector>

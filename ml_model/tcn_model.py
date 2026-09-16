@@ -53,7 +53,8 @@ class CausalConv1d(nn.Conv1d):
                          padding=self._trim, dilation=dilation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = super().forward(x)
+        out = torch.nn.functional.conv1d(x, self.weight, self.bias, self.stride,
+                       self.padding, self.dilation, self.groups)
         return out[..., :-self._trim] if self._trim else out
 
 
@@ -123,14 +124,11 @@ class TCNModel(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        if x.dim() != 3 or x.shape[1] != IN_CHANNELS:
-            raise ValueError(
-                f"expected (B, {IN_CHANNELS}, T), got {tuple(x.shape)}")
         seq = self.blocks(self.stem(x))          # (B, C, T)
         pooled = self.pool(seq).flatten(1)       # (B, C)
 
         disp = self.head_disp(pooled)
-        logvar = disp[:, 1].clamp(LOGVAR_MIN, LOGVAR_MAX)
+        logvar = disp[:, 1].clamp(-6.0, 4.0)
         return {
             "mu": self.softplus(disp[:, 0]),
             "logvar": logvar,

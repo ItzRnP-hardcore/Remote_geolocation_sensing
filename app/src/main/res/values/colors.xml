@@ -25,4 +25,17 @@
     <color name="action_record">#0A84FF</color>
     <color name="action_armed">#D03B3B</color>
     <color name="track_snap">#0C7A3E</color>
+
+    <!-- Modern Glass & HUD colors -->
+    <color name="overlay_card_glass">#E61C1C24</color>
+    <color name="overlay_surface_highlight">#15FFFFFF</color>
+    <color name="overlay_stroke_subtle">#20FFFFFF</color>
+    <color name="history_banner_bg">#F213151C</color>
+    <color name="toggle_inactive">#802E2E38</color>
+    <color name="toggle_active_gps">#1E88E5</color>
+    <color name="toggle_active_imu">#F4511E</color>
+    <color name="toggle_active_snap">#2E7D32</color>
+    <color name="drag_handle">#66FFFFFF</color>
+    <color name="brand_surface">#2A1668C6</color>
+    <color name="toggle_active_heading">#1E88E5</color>
 </resources>

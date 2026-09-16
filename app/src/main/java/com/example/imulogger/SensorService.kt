@@ -83,6 +83,15 @@ class SensorService : Service() {
         @Volatile
         private var freeRunRequested = false
 
+        @Volatile
+        var useMagnetometerYaw = false
+
+        @Volatile
+        var useModelYawHead = true
+
+        @Volatile
+        var isPhoneFixed = true
+
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
 
@@ -99,6 +108,7 @@ class SensorService : Service() {
         private const val MAX_REPORT_LATENCY_US = 1_000_000
 
         private const val FLUSH_INTERVAL_MS = 2_000L
+        private const val UI_TICK_MS = 100L
 
         /** mapmatch.csv `mode` column: which estimator produced the row. */
         private const val MODE_MATCH = "match"
@@ -118,6 +128,11 @@ class SensorService : Service() {
 
         /** Observed by the UI. Safe to collect from anywhere. */
         val status: StateFlow<LoggerStatus> = _status.asStateFlow()
+
+        private val _azimuth = MutableStateFlow(0f)
+
+        /** High-rate orientation azimuth in degrees for smooth compass rotation (~25 Hz). */
+        val azimuth: StateFlow<Float> = _azimuth.asStateFlow()
 
         private val _track = MutableStateFlow<List<TrackPoint>>(emptyList())
 
@@ -271,6 +286,7 @@ class SensorService : Service() {
 
     /** Written on the logger thread, read by the periodic publish. */
     private var latestAzimuthDeg: Float = 0f
+    private var lastAzimuthTimeNanos: Long = 0L
 
     /** Latest model outputs, written on the ML thread and published on the periodic tick. */
     @Volatile private var mlMu: Float = Float.NaN
@@ -324,11 +340,13 @@ class SensorService : Service() {
     private val drPoints = ArrayList<TrackPoint>()
     private var drWriter: BufferedWriter? = null
     private var lastDrSampleNs = 0L
+    private var lastGyroNs = 0L
 
     // ------------------------------------------------------------------ lifecycle
 
     override fun onCreate() {
         super.onCreate()
+        deadReckoner.isPhoneFixed = isPhoneFixed
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
@@ -406,6 +424,7 @@ class SensorService : Service() {
                 loggerHandler.post {
                     writeMlRow(tNs, mu, logvar, stationary, yaw)
                     fuseModelSpeed(mu, logvar, stationary)
+                    fuseModelYaw(yaw, 0.1)
                 }
             } finally {
                 mlPending.decrementAndGet()
@@ -423,6 +442,15 @@ class SensorService : Service() {
             .append(stationary).append(',')
             .append(yaw).append('\n')
         writeRow(mlWriter, sb)
+    }
+
+    /**
+     * Runs on the logger thread: let the ML model's yaw head steer heading during outages.
+     */
+    private fun fuseModelYaw(yawRateRadS: Float, dt: Double) {
+        if (!useModelYawHead) return
+        if (!unaidedNow()) return
+        deadReckoner.onYawRate(yawRateRadS.toDouble(), dt)
     }
 
     /**
@@ -515,7 +543,8 @@ class SensorService : Service() {
             Thread.currentThread().interrupt()
         }
 
-        loggerHandler.removeCallbacks(periodicTask)
+        loggerHandler.removeCallbacks(flushTask)
+        loggerHandler.removeCallbacks(uiTickTask)
         loggerHandler.post { closeSession() }
         loggerThread.quitSafely()
         try {
@@ -622,7 +651,8 @@ class SensorService : Service() {
         ensureLocationSubscribed()
         writeSessionMetadata(dir)
 
-        loggerHandler.post(periodicTask)
+        loggerHandler.post(flushTask)
+        loggerHandler.post(uiTickTask)
 
         _status.value = LoggerStatus(
             running = true,
@@ -784,8 +814,8 @@ class SensorService : Service() {
             64 * 1024,
         )
 
-    /** Flush to disk and republish counters, so a crash mid-drive costs at most one interval. */
-    private val periodicTask = object : Runnable {
+    /** Flush to disk every 2 seconds, so a crash mid-drive costs at most one interval. */
+    private val flushTask = object : Runnable {
         override fun run() {
             try {
                 imuWriter?.flush()
@@ -803,6 +833,15 @@ class SensorService : Service() {
                 writeErrors++
                 Log.e(TAG, "Flush failed", e)
             }
+            if (sessionActive) {
+                loggerHandler.postDelayed(this, FLUSH_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** Fast 10 Hz UI telemetry tick so the map marker, elapsed timer, and live tracks advance smoothly. */
+    private val uiTickTask = object : Runnable {
+        override fun run() {
             publishStatus()
             if (trackDirty) {
                 trackDirty = false
@@ -865,7 +904,9 @@ class SensorService : Service() {
                     }
                 }
             }
-            loggerHandler.postDelayed(this, FLUSH_INTERVAL_MS)
+            if (sessionActive) {
+                loggerHandler.postDelayed(this, UI_TICK_MS)
+            }
         }
     }
 
@@ -904,11 +945,14 @@ class SensorService : Service() {
             matchMap = matchMapName,
             drSpeedMps = deadReckoner.speed,
             mlMu = mlMu,
+            mlLogvar = mlLogvar,
+            mlYawRate = mlYawRate,
             mlStationaryProbability =
                 if (mlStationaryLogit.isNaN()) Float.NaN
                 else 1f / (1f + kotlin.math.exp(-mlStationaryLogit)),
             mlInferences = mlInferences,
             mlDropped = mlDropped,
+            drCourseDeg = deadReckoner.courseDeg,
         )
     }
 
@@ -996,10 +1040,35 @@ class SensorService : Service() {
                     )
                     recordDeadReckoning(event.timestamp)
                 }
-                Sensor.TYPE_GYROSCOPE ->
+                Sensor.TYPE_GYROSCOPE -> {
                     deadReckoner.onGyro(event.values[0], event.values[1], event.values[2])
-                Sensor.TYPE_ROTATION_VECTOR ->
-                    deadReckoner.onRotationVector(event.values)
+                    val now = event.timestamp
+                    val prevG = lastGyroNs
+                    lastGyroNs = now
+                    if (deadReckoner.isPhoneFixed && unaidedNow() && !deadReckoner.isStationary && prevG != 0L) {
+                        val dtG = (now - prevG) / 1e9
+                        if (dtG in 0.001..0.05 && deadReckoner.rotationInto(rotationMatrix)) {
+                            val gb = deadReckoner.gyroBias
+                            val gx = event.values[0] - gb[0].toFloat()
+                            val gy = event.values[1] - gb[1].toFloat()
+                            val gz = event.values[2] - gb[2].toFloat()
+                            val wU = rotationMatrix[6] * gx + rotationMatrix[7] * gy + rotationMatrix[8] * gz
+                            if (!useModelYawHead) {
+                                deadReckoner.onYawRate(-wU.toDouble(), dtG)
+                            }
+                        }
+                    }
+                }
+                Sensor.TYPE_ROTATION_VECTOR -> {
+                    if (useMagnetometerYaw) {
+                        deadReckoner.onRotationVector(event.values)
+                    }
+                }
+                Sensor.TYPE_GAME_ROTATION_VECTOR -> {
+                    if (!useMagnetometerYaw) {
+                        deadReckoner.onRotationVector(event.values)
+                    }
+                }
             }
 
             // Levelling for the model runs on the gyro tick because gyro is the fastest stream
@@ -1018,10 +1087,14 @@ class SensorService : Service() {
                 // StateFlow per gyro event allocates a LoggerStatus and wakes the UI collector
                 // 200 times a second. The periodic tick publishes it instead.
                 latestAzimuthDeg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+                val now = event.timestamp
+                if (now - lastAzimuthTimeNanos >= 40_000_000L) { // ~25 Hz throttled update
+                    lastAzimuthTimeNanos = now
+                    _azimuth.value = latestAzimuthDeg
+                }
 
                 if (!modelReady) return
 
-                val now = event.timestamp
                 if (now - lastMLFeedTimeNanos < ML_PERIOD_NS) return
                 lastMLFeedTimeNanos = now
 
@@ -1230,7 +1303,8 @@ class SensorService : Service() {
             else -> GnssQuality.GOOD
         }
         trackPoints.add(TrackPoint(location.latitude, location.longitude, quality))
-        trackDirty = true
+        trackDirty = false
+        _track.value = ArrayList(trackPoints)
 
         // Only healthy fixes are allowed to correct the integrator. Anchoring to a degraded fix
         // would hide exactly the error this app exists to measure — and in free-run mode nothing

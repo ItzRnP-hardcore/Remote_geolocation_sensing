@@ -1,26 +1,504 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <org.osmdroid.views.MapView
-        android:id="@+id/map"
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent">
 
-    <!-- Shown only when offline mode has nothing on disk to draw. Links straight to the zone
-         list rather than quoting a filesystem path at the user. -->
+        <org.osmdroid.views.MapView
+            android:id="@+id/map"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- Shown only when offline mode has nothing on disk to draw. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardEmpty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginHorizontal="32dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="@color/overlay_card"
+            app:cardCornerRadius="20dp"
+            app:cardElevation="8dp"
+            app:strokeColor="@color/overlay_stroke"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/empty_title"
+                    android:textColor="@color/on_overlay_primary"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvEmptyBody"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/empty_body"
+                    android:textColor="@color/on_overlay_secondary"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tvEmptyPath"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textColor="@color/on_overlay_muted"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnEmptyDownload"
+                    android:layout_width="match_parent"
+                    android:layout_height="52dp"
+                    android:layout_marginTop="16dp"
+                    android:text="@string/empty_action"
+                    android:textStyle="bold"
+                    app:backgroundTint="@color/action_record"
+                    app:cornerRadius="14dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Top Bar with glassmorphic styling -->
+        <LinearLayout
+            android:id="@+id/topBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:background="@color/overlay_scrim"
+            android:orientation="vertical"
+            android:paddingHorizontal="16dp"
+            android:paddingTop="48dp"
+            android:paddingBottom="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/chipState"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_pill"
+                    android:backgroundTint="@color/overlay_chip"
+                    android:elevation="4dp"
+                    android:paddingHorizontal="16dp"
+                    android:paddingVertical="10dp"
+                    android:text="@string/idle"
+                    android:textColor="@color/on_overlay_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/chipGnss"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:background="@drawable/bg_pill"
+                    android:backgroundTint="@color/overlay_chip"
+                    android:elevation="4dp"
+                    android:paddingHorizontal="16dp"
+                    android:paddingVertical="10dp"
+                    android:text="@string/gnss_idle"
+                    android:textColor="@color/on_overlay_secondary"
+                    android:textSize="14sp" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <ImageButton
+                    android:id="@+id/btnHistory"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:layout_marginEnd="10dp"
+                    android:background="@drawable/bg_pill"
+                    android:backgroundTint="@color/overlay_chip"
+                    android:contentDescription="@string/session_history"
+                    android:elevation="4dp"
+                    android:padding="10dp"
+                    android:src="@drawable/ic_history" />
+
+                <ImageButton
+                    android:id="@+id/btnTheme"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:layout_marginEnd="10dp"
+                    android:background="@drawable/bg_pill"
+                    android:backgroundTint="@color/overlay_chip"
+                    android:contentDescription="@string/map_theme"
+                    android:elevation="4dp"
+                    android:padding="11dp"
+                    android:src="@drawable/ic_theme" />
+
+                <ImageButton
+                    android:id="@+id/btnSettings"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/bg_pill"
+                    android:backgroundTint="@color/overlay_chip"
+                    android:contentDescription="@string/settings"
+                    android:elevation="4dp"
+                    android:padding="11dp"
+                    android:src="@drawable/ic_settings" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/chipCoverage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_pill"
+                android:backgroundTint="@color/overlay_chip"
+                android:elevation="4dp"
+                android:paddingHorizontal="16dp"
+                android:paddingVertical="10dp"
+                android:textColor="@color/quality_weak"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- History Mode Banner (Shown when inspecting a past session) -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/historyBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="115dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="@color/history_banner_bg"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="6dp"
+            app:strokeColor="@color/brand"
+            app:strokeWidth="1.5dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="16dp"
+                android:paddingVertical="12dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tvHistoryTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/viewing_history"
+                        android:textColor="@color/on_overlay_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvHistoryStats"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:textColor="@color/on_overlay_secondary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnExitHistory"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="38dp"
+                    android:text="@string/exit_history"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="10dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Destination Search Card -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/searchCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="115dp"
+            app:cardBackgroundColor="@color/overlay_card_glass"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="6dp"
+            app:strokeColor="@color/overlay_stroke"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="14dp">
+
+                    <ImageView
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:src="@drawable/ic_search"
+                        app:tint="@color/on_overlay_secondary" />
+
+                    <EditText
+                        android:id="@+id/etSearchDestination"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:background="@null"
+                        android:hint="@string/search_destination"
+                        android:imeOptions="actionSearch"
+                        android:inputType="text"
+                        android:maxLines="1"
+                        android:singleLine="true"
+                        android:textColor="@color/on_overlay_primary"
+                        android:textColorHint="@color/on_overlay_muted"
+                        android:textSize="13sp" />
+
+                    <ImageButton
+                        android:id="@+id/btnClearSearch"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cancel"
+                        android:src="@drawable/ic_close"
+                        android:visibility="gone"
+                        app:tint="@color/on_overlay_muted" />
+                </LinearLayout>
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/rvSearchSuggestions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:maxHeight="220dp"
+                    android:visibility="gone" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Navigation HUD Banner (Active Route) -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/navHudCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="115dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="@color/history_banner_bg"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="8dp"
+            app:strokeColor="@color/brand"
+            app:strokeWidth="1.5dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="16dp"
+                android:paddingVertical="12dp">
+
+                <ImageView
+                    android:layout_width="26dp"
+                    android:layout_height="26dp"
+                    android:src="@drawable/ic_navigation"
+                    app:tint="@color/action_record" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tvNavTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/destination"
+                        android:textColor="@color/on_overlay_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvNavStats"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="@string/route_calculating"
+                        android:textColor="@color/action_record"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnExitNav"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="38dp"
+                    android:text="@string/clear_navigation"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="10dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Floating Controls Above Bottom Sheet -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="112dp"
+            android:gravity="end"
+            android:orientation="vertical">
+
+            <!-- Heading-Up Map Rotation Toggle Pill -->
+            <LinearLayout
+                android:id="@+id/btnToggleOrientation"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="10dp"
+                android:background="@drawable/bg_pill"
+                android:backgroundTint="@color/overlay_card_glass"
+                android:clickable="true"
+                android:elevation="4dp"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="5dp">
+
+                <ImageView
+                    android:id="@+id/ivCompassNeedle"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_compass" />
+
+                <TextView
+                    android:id="@+id/tvOrientationMode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:text="@string/north_up_mode"
+                    android:textColor="@color/on_overlay_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchMapOrientation"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:checked="false"
+                    android:clickable="false"
+                    android:focusable="false" />
+            </LinearLayout>
+
+            <!-- Track Layer Visibility Toggles -->
+            <LinearLayout
+                android:id="@+id/layerToggleBar"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_pill"
+                android:backgroundTint="@color/overlay_card_glass"
+                android:elevation="4dp"
+                android:orientation="horizontal"
+                android:padding="3dp">
+
+                <TextView
+                    android:id="@+id/btnToggleGps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_layer_pill"
+                    android:backgroundTint="@color/toggle_active_gps"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/legend_gps"
+                    android:textColor="@color/on_overlay_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnToggleDr"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/bg_layer_pill"
+                    android:backgroundTint="@color/toggle_active_imu"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/legend_imu"
+                    android:textColor="@color/on_overlay_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnToggleSnap"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/bg_layer_pill"
+                    android:backgroundTint="@color/toggle_active_snap"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/legend_snap"
+                    android:textColor="@color/on_overlay_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabCentre"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/centre_on_position"
+                android:src="@drawable/ic_centre"
+                app:backgroundTint="@color/overlay_chip"
+                app:elevation="4dp"
+                app:fabSize="mini"
+                app:tint="@color/on_overlay_primary" />
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- Modern Material 3 Bottom Sheet HUD -->
     <com.google.android.material.card.MaterialCardView
-        android:id="@+id/cardEmpty"
+        android:id="@+id/panelCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginHorizontal="32dp"
-        android:visibility="gone"
-        app:cardBackgroundColor="@color/overlay_card"
-        app:cardCornerRadius="20dp"
-        app:cardElevation="8dp"
+        app:behavior_hideable="false"
+        app:behavior_peekHeight="96dp"
+        app:cardBackgroundColor="@color/overlay_card_glass"
+        app:cardCornerRadius="28dp"
+        app:cardElevation="16dp"
+        app:layout_behavior="com.google.android.material.bottomsheet.BottomSheetBehavior"
         app:strokeColor="@color/overlay_stroke"
         app:strokeWidth="1dp">
 
@@ -28,181 +506,69 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="20dp">
+            android:paddingHorizontal="20dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="24dp">
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/empty_title"
-                android:textColor="@color/on_overlay_primary"
-                android:textSize="18sp"
-                android:textStyle="bold" />
+            <!-- Drag Handle -->
+            <View
+                android:layout_width="38dp"
+                android:layout_height="4dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_drag_handle" />
 
-            <TextView
-                android:id="@+id/tvEmptyBody"
+            <!-- Peek HUD Bar (Always visible in collapsed state) -->
+            <LinearLayout
+                android:id="@+id/peekBar"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="@string/empty_body"
-                android:textColor="@color/on_overlay_secondary"
-                android:textSize="14sp" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingBottom="8dp">
 
-            <TextView
-                android:id="@+id/tvEmptyPath"
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tvPeekSpeed"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0 km/h"
+                        android:textColor="@color/on_overlay_primary"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvPeekDrift"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="drift: —"
+                        android:textColor="@color/on_overlay_secondary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRecord"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:minWidth="130dp"
+                    android:text="@string/start"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    app:backgroundTint="@color/action_record"
+                    app:cornerRadius="14dp" />
+            </LinearLayout>
+
+            <!-- Expanded Telemetry (Revealed on swipe up) -->
+            <View
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:textColor="@color/on_overlay_muted"
-                android:textSize="11sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnEmptyDownload"
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:layout_marginTop="16dp"
-                android:text="@string/empty_action"
-                android:textStyle="bold"
-                app:backgroundTint="@color/action_record"
-                app:cornerRadius="14dp" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
-
-    <LinearLayout
-        android:id="@+id/topBar"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:background="@color/overlay_scrim"
-        android:orientation="vertical"
-        android:paddingHorizontal="16dp"
-        android:paddingTop="48dp"
-        android:paddingBottom="16dp">
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
-
-        <TextView
-            android:id="@+id/chipState"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:background="@drawable/bg_pill"
-            android:backgroundTint="@color/overlay_chip"
-            android:textColor="@color/on_overlay_primary"
-            android:paddingHorizontal="16dp"
-            android:paddingVertical="10dp"
-            android:text="@string/idle"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            android:elevation="4dp" />
-
-        <TextView
-            android:id="@+id/chipGnss"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
-            android:background="@drawable/bg_pill"
-            android:backgroundTint="@color/overlay_chip"
-            android:textColor="@color/on_overlay_secondary"
-            android:paddingHorizontal="16dp"
-            android:paddingVertical="10dp"
-            android:text="@string/gnss_idle"
-            android:textSize="14sp"
-            android:elevation="4dp" />
-
-        <Space
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <ImageButton
-            android:id="@+id/btnTheme"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
-            android:layout_marginEnd="10dp"
-            android:background="@drawable/bg_pill"
-            android:backgroundTint="@color/overlay_chip"
-            android:contentDescription="@string/map_theme"
-            android:elevation="4dp"
-            android:padding="11dp"
-            android:src="@drawable/ic_theme" />
-
-        <ImageButton
-            android:id="@+id/btnSettings"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
-            android:background="@drawable/bg_pill"
-            android:backgroundTint="@color/overlay_chip"
-            android:contentDescription="@string/settings"
-            android:elevation="4dp"
-            android:padding="11dp"
-            android:src="@drawable/ic_settings" />
-    </LinearLayout>
-
-        <!-- Coverage hint: the position is known but no installed map contains it. Tapping it
-             offers the zone that probably does. -->
-        <TextView
-            android:id="@+id/chipCoverage"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:background="@drawable/bg_pill"
-            android:backgroundTint="@color/overlay_chip"
-            android:elevation="4dp"
-            android:paddingHorizontal="16dp"
-            android:paddingVertical="10dp"
-            android:textColor="@color/quality_weak"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            android:visibility="gone" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:orientation="vertical">
-
-        <com.google.android.material.floatingactionbutton.FloatingActionButton
-            android:id="@+id/fabPanel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="end"
-            android:layout_marginEnd="20dp"
-            android:layout_marginBottom="12dp"
-            android:contentDescription="@string/show_panel"
-            android:src="@drawable/ic_panel" />
-
-        <com.google.android.material.floatingactionbutton.FloatingActionButton
-            android:id="@+id/fabCentre"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="end"
-            android:layout_marginEnd="20dp"
-            android:layout_marginBottom="12dp"
-            android:contentDescription="@string/centre_on_position"
-            android:src="@drawable/ic_centre"
-            app:fabSize="mini" />
-
-    <com.google.android.material.card.MaterialCardView
-        android:id="@+id/panelCard"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:visibility="gone"
-        android:layout_margin="16dp"
-        app:cardCornerRadius="24dp"
-        app:cardElevation="8dp"
-        app:cardBackgroundColor="@color/overlay_card"
-        app:strokeWidth="1dp"
-        app:strokeColor="@color/overlay_stroke">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="20dp">
+                android:layout_height="1dp"
+                android:layout_marginVertical="12dp"
+                android:background="@color/overlay_stroke_subtle" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -248,7 +614,7 @@
                     <TextView
                         android:id="@+id/mDrift"
                         style="@style/Metric.Value"
-                        android:textSize="28sp"
+                        android:textSize="26sp"
                         android:textStyle="bold"
                         android:textColor="@color/on_overlay_primary"
                         android:text="—" />
@@ -301,7 +667,7 @@
                         android:drawableStart="@drawable/swatch_imu"
                         android:gravity="center_vertical"
                         android:text="@string/legend_imu"
-                        android:textSize="15sp"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
@@ -312,9 +678,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:textColor="@color/on_overlay_muted"
-                android:textSize="14sp" />
+                android:textSize="13sp" />
 
-            <!-- The only on-screen proof that the along-road pipeline has a map to work with. -->
             <TextView
                 android:id="@+id/tvMatchSource"
                 android:layout_width="match_parent"
@@ -324,29 +689,18 @@
                 android:textSize="12sp" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnRecord"
-                android:layout_width="match_parent"
-                android:layout_height="60dp"
-                android:layout_marginTop="24dp"
-                android:text="@string/start"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                app:cornerRadius="16dp"
-                app:backgroundTint="@color/action_record" />
-
-            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnFreeRun"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="match_parent"
-                android:layout_height="60dp"
-                android:layout_marginTop="12dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="16dp"
                 android:text="@string/free_run"
-                android:textSize="16sp"
-                app:cornerRadius="16dp"
+                android:textSize="15sp"
+                app:cornerRadius="14dp"
                 app:strokeColor="@color/overlay_stroke_strong"
                 android:textColor="@color/on_overlay_primary" />
+
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
-    </LinearLayout>
 
-</FrameLayout>
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

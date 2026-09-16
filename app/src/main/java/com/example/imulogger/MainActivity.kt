@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
+import android.content.res.ColorStateList
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -28,6 +29,38 @@ import android.graphics.DashPathEffect
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
+import android.annotation.SuppressLint
+import android.location.Location
+import android.location.LocationManager
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.view.HapticFeedbackConstants
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.card.MaterialCardView
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.inputmethod.InputMethodManager
+import android.graphics.Color
+import android.graphics.Paint
+import android.widget.ImageView
+import android.widget.Button
+import kotlinx.coroutines.delay
+import org.osmdroid.events.MapEventsReceiver
+import org.osmdroid.views.overlay.MapEventsOverlay
+import org.osmdroid.util.BoundingBox
+
 class MainActivity : AppCompatActivity() {
 
     private companion object {
@@ -37,11 +70,16 @@ class MainActivity : AppCompatActivity() {
         const val CENTRE_RADIUS_KM = 1.0
     }
 
-
     private lateinit var binding: ActivityMainBinding
+    private lateinit var bottomSheetBehavior: BottomSheetBehavior<MaterialCardView>
     private lateinit var trackLine: Polyline
     private lateinit var drLine: Polyline
     private lateinit var snapLine: Polyline
+    private lateinit var routeLine: Polyline
+    private var destinationMarker: Marker? = null
+    private var activeDestination: GeoPoint? = null
+    private var activeDestinationName: String? = null
+    private var roadNetwork: RoadNetwork? = null
     private lateinit var marker: Marker
     private lateinit var drMarker: Marker
     private lateinit var locationOverlay: MyLocationNewOverlay
@@ -56,6 +94,60 @@ class MainActivity : AppCompatActivity() {
     private var trackSize = 0
     private var drSize = 0
     private var snapSize = 0
+
+    private var showGpsTrack = true
+    private var showDrTrack = true
+    private var showSnapTrack = true
+    private var isViewingHistory = false
+    private var historySession: SessionManager.LoadedSession? = null
+    private var currentMarkerRotation = 0f
+    private var isHeadingUpMode = false
+    private var currentMapOrientation = 0f
+    private var latestKnownAzimuth = 0f
+    private var lastGnssQuality: GnssQuality? = null
+
+    private var sensorManager: SensorManager? = null
+    private var rotationSensor: Sensor? = null
+    private val rotationMatrix = FloatArray(9)
+    private val orientationAngles = FloatArray(3)
+
+    private val compassListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val azimuthDeg: Float? = when (event.sensor.type) {
+                Sensor.TYPE_ROTATION_VECTOR, Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR -> {
+                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
+                    Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+                }
+                Sensor.TYPE_ORIENTATION -> event.values[0]
+                else -> null
+            }
+
+            if (azimuthDeg != null) {
+                applyHeading(azimuthDeg)
+            }
+
+            // Keep marker positioned if locationOverlay found coordinates first
+            if (marker.position == null && ::locationOverlay.isInitialized && locationOverlay.myLocation != null) {
+                val loc = locationOverlay.myLocation
+                marker.position = loc
+                drMarker.position = loc
+                binding.map.invalidate()
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private var locationWatcherRegistered = false
+    private var hasInitialCentered = false
+
+    private val locationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            checkAndRefreshLocation()
+        }
+    }
 
     private var radiusKm = 10.0
     private var lastPrefetchCentre: GeoPoint? = null
@@ -82,7 +174,8 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
         if (granted[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
-            startRecording()
+            checkAndRefreshLocation()
+            showCalibrationDialog()
         } else {
             Toast.makeText(
                 this,
@@ -101,26 +194,53 @@ class MainActivity : AppCompatActivity() {
 
         copyMapFromAssetsIfNeeded()
 
+        val prefs = getSharedPreferences("imu_prefs", Context.MODE_PRIVATE)
+        SensorService.useMagnetometerYaw = prefs.getBoolean("use_magnetometer_yaw", false)
+        SensorService.isPhoneFixed = prefs.getBoolean("is_phone_fixed", true)
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        rotationSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            ?: sensorManager?.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+            ?: sensorManager?.getDefaultSensor(Sensor.TYPE_ORIENTATION)
+
         setUpMap()
 
+        // Modern Material 3 Bottom Sheet setup
+        bottomSheetBehavior = BottomSheetBehavior.from(binding.panelCard).apply {
+            state = BottomSheetBehavior.STATE_COLLAPSED
+            isHideable = false
+            addBottomSheetCallback(object : BottomSheetBehavior.BottomSheetCallback() {
+                override fun onStateChanged(bottomSheet: View, newState: Int) {
+                    panelExpanded = (newState == BottomSheetBehavior.STATE_EXPANDED)
+                }
+                override fun onSlide(bottomSheet: View, slideOffset: Float) {}
+            })
+        }
+
         binding.btnRecord.setOnClickListener {
+            hapticClick()
             if (SensorService.status.value.running) {
                 stopService(Intent(this, SensorService::class.java))
             } else if (hasFineLocation()) {
-                startRecording()
+                showCalibrationDialog()
             } else {
                 requestPermissions()
             }
         }
+
+        binding.btnHistory.setOnClickListener { showHistoryDialog() }
+        binding.btnExitHistory.setOnClickListener { exitHistoryMode() }
 
         binding.btnSettings.setOnClickListener { showSettings() }
         binding.btnEmptyDownload.setOnClickListener { showSettings() }
         binding.tvEmptyPath.text = "Or drop a .map file into " + OfflineMaps.baseDir(this).absolutePath
 
         binding.btnTheme.setOnClickListener {
+            hapticClick()
             MapsforgeSource.setNight(this, !MapsforgeSource.isNight(this))
             reattachMap()
             Toast.makeText(
@@ -131,13 +251,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnFreeRun.setOnClickListener {
+            hapticClick()
             SensorService.setFreeRun(!SensorService.status.value.freeRun)
         }
 
-        binding.fabCentre.setOnClickListener { centreOnMe() }
+        binding.fabCentre.setOnClickListener {
+            hapticClick()
+            centreOnMe()
+        }
 
-        binding.fabPanel.setOnClickListener { setPanelExpanded(!panelExpanded) }
-        setPanelExpanded(false)
+        binding.btnToggleOrientation.setOnClickListener {
+            toggleHeadingUpMode()
+        }
+
+        setupLayerToggles()
+        setupDestinationSearch()
 
         // Insets rather than a hardcoded 48dp: the status bar is a different height on other
         // devices and in landscape, and the chips end up either clipped or floating.
@@ -154,6 +282,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch { SensorService.status.collect { render(it) } }
+                launch { SensorService.azimuth.collect { applyHeading(it) } }
                 launch { SensorService.track.collect { drawTrack(it) } }
                 launch { SensorService.drTrack.collect { drawDrTrack(it) } }
                 launch { SensorService.snapTrack.collect { drawSnapTrack(it) } }
@@ -170,6 +299,17 @@ class MainActivity : AppCompatActivity() {
             IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
             ContextCompat.RECEIVER_EXPORTED,
         )
+
+        val locationFilter = IntentFilter(LocationManager.PROVIDERS_CHANGED_ACTION).apply {
+            addAction(LocationManager.MODE_CHANGED_ACTION)
+        }
+        ContextCompat.registerReceiver(
+            this,
+            locationReceiver,
+            locationFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        locationWatcherRegistered = true
     }
 
     override fun onResume() {
@@ -177,14 +317,25 @@ class MainActivity : AppCompatActivity() {
         binding.map.onResume()
         // The common case: the download finished while the app was in the background or dead.
         promoteDownloads()
+        checkAndRefreshLocation()
+        rotationSensor?.let {
+            sensorManager?.registerListener(compassListener, it, SensorManager.SENSOR_DELAY_GAME)
+        }
     }
 
     override fun onPause() {
+        sensorManager?.unregisterListener(compassListener)
         binding.map.onPause()
         super.onPause()
     }
 
     override fun onStop() {
+        if (locationWatcherRegistered) {
+            try {
+                unregisterReceiver(locationReceiver)
+            } catch (_: Exception) {}
+            locationWatcherRegistered = false
+        }
         unregisterReceiver(downloadReceiver)
         super.onStop()
     }
@@ -192,6 +343,7 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ map
 
     private fun setUpMap() = with(binding.map) {
+        setLayerType(View.LAYER_TYPE_HARDWARE, null)
         val vectorBounds = OfflineMaps.apply(this, offline)
         setMultiTouchControls(true)
         zoomController.setVisibility(
@@ -209,7 +361,11 @@ class MainActivity : AppCompatActivity() {
             false 
         }
 
-        locationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(context), this)
+        val provider = GpsMyLocationProvider(context).apply {
+            addLocationSource(LocationManager.NETWORK_PROVIDER)
+            addLocationSource(LocationManager.GPS_PROVIDER)
+        }
+        locationOverlay = MyLocationNewOverlay(provider, this)
         
         // Custom blue dot for location
         val size = (16 * resources.displayMetrics.density).toInt()
@@ -262,6 +418,19 @@ class MainActivity : AppCompatActivity() {
         }
         
         locationOverlay.enableMyLocation()
+        locationOverlay.runOnFirstFix {
+            runOnUiThread {
+                val myLoc = locationOverlay.myLocation
+                if (myLoc != null && marker.position == null) {
+                    marker.position = myLoc
+                    drMarker.position = myLoc
+                    if (followPosition && !isViewingHistory) {
+                        binding.map.controller.animateTo(myLoc)
+                    }
+                    binding.map.invalidate()
+                }
+            }
+        }
         overlays.add(locationOverlay)
 
         // Dark mode mapping with enhanced road visibility
@@ -287,31 +456,37 @@ class MainActivity : AppCompatActivity() {
             overlayManager.tilesOverlay.setColorFilter(android.graphics.ColorMatrixColorFilter(nightMatrix))
         }
 
-        trackLine = Polyline(this).apply {
-            outlinePaint.color = ContextCompat.getColor(context, R.color.track)
-            outlinePaint.strokeWidth = 8f
+        // Navigation route polyline
+        routeLine = Polyline(this).apply {
+            outlinePaint.color = Color.parseColor("#00E5FF")
+            outlinePaint.strokeWidth = 14f
+            outlinePaint.strokeCap = Paint.Cap.ROUND
+            outlinePaint.strokeJoin = Paint.Join.ROUND
         }
-        // Dashed, so the two tracks stay distinguishable where they overlap and for anyone who
-        // cannot separate the blue from the orange.
-        drLine = Polyline(this).apply {
-            outlinePaint.color = ContextCompat.getColor(context, R.color.track_imu)
-            outlinePaint.strokeWidth = 7f
-            outlinePaint.pathEffect = DashPathEffect(floatArrayOf(18f, 12f), 0f)
+        destinationMarker = Marker(binding.map).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            icon = ContextCompat.getDrawable(this@MainActivity, R.drawable.ic_destination_pin)
+            title = getString(R.string.destination)
         }
-        // The snapped track sits under both so the raw tracks stay readable over it.
-        snapLine = Polyline(this).apply {
-            outlinePaint.color = ContextCompat.getColor(context, R.color.track_snap)
-            outlinePaint.strokeWidth = 12f
-            outlinePaint.alpha = 200
-        }
-        marker = Marker(this).apply {
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-            icon = ContextCompat.getDrawable(context, R.drawable.ic_position)
-        }
-        drMarker = Marker(this).apply {
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-            icon = ContextCompat.getDrawable(context, R.drawable.ic_position_imu)
-        }
+
+        val mapEventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
+            override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
+                if (binding.rvSearchSuggestions.visibility == View.VISIBLE) {
+                    binding.rvSearchSuggestions.visibility = View.GONE
+                    hideKeyboard()
+                    return true
+                }
+                return false
+            }
+
+            override fun longPressHelper(p: GeoPoint): Boolean {
+                hapticClick()
+                navigateTo(p, "Pinned Destination")
+                return true
+            }
+        })
+        overlays.add(0, mapEventsOverlay)
+        overlays.add(routeLine)
         overlays.add(snapLine)
         overlays.add(trackLine)
         overlays.add(drLine)
@@ -331,14 +506,13 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setPanelExpanded(expanded: Boolean) {
         panelExpanded = expanded
-        androidx.transition.TransitionManager.beginDelayedTransition(
-            binding.root as android.view.ViewGroup,
-            androidx.transition.AutoTransition().apply { duration = 180 },
-        )
-        binding.panelCard.visibility = if (expanded) android.view.View.VISIBLE else android.view.View.GONE
-        binding.fabPanel.setImageResource(if (expanded) R.drawable.ic_close else R.drawable.ic_panel)
-        binding.fabPanel.contentDescription =
-            getString(if (expanded) R.string.hide_panel else R.string.show_panel)
+        if (::bottomSheetBehavior.isInitialized) {
+            bottomSheetBehavior.state = if (expanded) {
+                BottomSheetBehavior.STATE_EXPANDED
+            } else {
+                BottomSheetBehavior.STATE_COLLAPSED
+            }
+        }
     }
 
     /**
@@ -358,7 +532,18 @@ class MainActivity : AppCompatActivity() {
             }
 
         if (here == null) {
-            Toast.makeText(this, "No position yet — waiting for a GPS fix.", Toast.LENGTH_SHORT).show()
+            if (!isLocationEnabled()) {
+                com.google.android.material.snackbar.Snackbar.make(
+                    binding.root,
+                    "Location services are turned off",
+                    com.google.android.material.snackbar.Snackbar.LENGTH_LONG
+                ).setAction("Turn On") {
+                    startActivity(Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }.show()
+                return
+            }
+            checkAndRefreshLocation()
+            Toast.makeText(this, "Acquiring location fix…", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -392,22 +577,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun drawTrack(points: List<TrackPoint>) {
+        if (isViewingHistory) return
         if (points.size == trackSize) return
+        val oldSize = trackSize
         trackSize = points.size
-        trackLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        if (oldSize == 0 || trackLine.actualPoints.isEmpty()) {
+            trackLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        } else {
+            for (i in oldSize until points.size) {
+                val pt = points[i]
+                trackLine.addPoint(GeoPoint(pt.lat, pt.lon))
+            }
+        }
         rebuildQualitySegments(points, trackLine, gpsQualityLines, 11f)
         points.lastOrNull()?.let {
             val here = GeoPoint(it.lat, it.lon)
             marker.position = here
-            if (followPosition) binding.map.controller.animateTo(here)
+            if (followPosition) binding.map.controller.setCenter(here)
         }
         binding.map.invalidate()
     }
 
     private fun drawDrTrack(points: List<TrackPoint>) {
+        if (isViewingHistory) return
         if (points.size == drSize) return
+        val oldSize = drSize
         drSize = points.size
-        drLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        if (oldSize == 0 || drLine.actualPoints.isEmpty()) {
+            drLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        } else {
+            for (i in oldSize until points.size) {
+                val pt = points[i]
+                drLine.addPoint(GeoPoint(pt.lat, pt.lon))
+            }
+        }
         rebuildQualitySegments(points, drLine, drQualityLines, 10f)
         points.lastOrNull()?.let { drMarker.position = GeoPoint(it.lat, it.lon) }
         binding.map.invalidate()
@@ -415,16 +618,20 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Repaint the stretches where GNSS was degraded or withheld, on top of the base track.
-     *
-     * The two tracks diverging is the whole story, and a viewer cannot see *why* unless the
-     * cause is drawn too. Rather than a multi-coloured polyline (osmdroid has no such thing),
-     * contiguous runs of non-GOOD points become their own overlays laid over the base line,
-     * starting one point early so they visually join the healthy track either side.
      */
     private fun drawSnapTrack(points: List<TrackPoint>) {
+        if (isViewingHistory) return
         if (points.size == snapSize) return
+        val oldSize = snapSize
         snapSize = points.size
-        snapLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        if (oldSize == 0 || snapLine.actualPoints.isEmpty()) {
+            snapLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        } else {
+            for (i in oldSize until points.size) {
+                val pt = points[i]
+                snapLine.addPoint(GeoPoint(pt.lat, pt.lon))
+            }
+        }
         binding.map.invalidate()
     }
 
@@ -705,6 +912,45 @@ class MainActivity : AppCompatActivity() {
             reattachMap()
         }
 
+        val swHeadingUp = view.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.swHeadingUp)
+        swHeadingUp?.isChecked = isHeadingUpMode
+        swHeadingUp?.setOnCheckedChangeListener { _, checked ->
+            if (checked != isHeadingUpMode) {
+                toggleHeadingUpMode(checked)
+            }
+        }
+        view.findViewById<View>(R.id.cardOrientation)?.setOnClickListener {
+            toggleHeadingUpMode()
+            swHeadingUp?.isChecked = isHeadingUpMode
+        }
+
+        val swMagYaw = view.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.swMagnetometerYaw)
+        swMagYaw?.isChecked = SensorService.useMagnetometerYaw
+        swMagYaw?.setOnCheckedChangeListener { _, checked ->
+            SensorService.useMagnetometerYaw = checked
+            getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
+                .putBoolean("use_magnetometer_yaw", checked).apply()
+        }
+        view.findViewById<View>(R.id.cardMagYaw)?.setOnClickListener {
+            swMagYaw?.toggle()
+        }
+
+        val swVehicle = view.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.swVehicleMode)
+        swVehicle?.isChecked = SensorService.isPhoneFixed
+        swVehicle?.setOnCheckedChangeListener { _, checked ->
+            SensorService.isPhoneFixed = checked
+            getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
+                .putBoolean("is_phone_fixed", checked).apply()
+        }
+        view.findViewById<View>(R.id.cardVehicleMode)?.setOnClickListener {
+            swVehicle?.toggle()
+        }
+
+        view.findViewById<View>(R.id.cardHistory).setOnClickListener {
+            sheet.dismiss()
+            showHistoryDialog()
+        }
+
         val advanced = view.findViewById<android.view.View>(R.id.advancedGroup)
         val btnAdvanced = view.findViewById<android.widget.TextView>(R.id.btnAdvanced)
         btnAdvanced.setOnClickListener {
@@ -907,18 +1153,15 @@ class MainActivity : AppCompatActivity() {
             else -> getString(R.string.idle)
         }
 
-        binding.fabPanel.backgroundTintList = android.content.res.ColorStateList.valueOf(
-            ContextCompat.getColor(
-                this,
-                when {
-                    status.error != null -> R.color.action_armed
-                    status.freeRun && status.running -> R.color.action_armed
-                    status.running -> R.color.action_record
-                    else -> R.color.overlay_chip
-                },
-            )
-        )
         if (status.error != null && !panelExpanded) setPanelExpanded(true)
+
+        val speedKmh = if (status.running && status.lastSpeedMps != null) status.lastSpeedMps * 3.6f else 0f
+        binding.tvPeekSpeed.text = String.format(Locale.US, "%.0f km/h", speedKmh)
+        binding.tvPeekDrift.text = if (status.running && status.drLat != null) {
+            String.format(Locale.US, "drift: %.0f m", status.driftMetres)
+        } else {
+            "drift: —"
+        }
 
         binding.btnRecord.text = when {
             status.running -> getString(R.string.stop)
@@ -927,6 +1170,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         val quality = status.gnssQuality
+        if (quality == GnssQuality.GOOD && lastGnssQuality != GnssQuality.GOOD) {
+            binding.chipGnss.animate().scaleX(1.08f).scaleY(1.08f).setDuration(150).withEndAction {
+                binding.chipGnss.animate().scaleX(1.0f).scaleY(1.0f).setDuration(150).start()
+            }.start()
+        }
+        lastGnssQuality = quality
         binding.chipGnss.setText(
             when (quality) {
                 GnssQuality.GOOD -> R.string.gnss_good
@@ -949,6 +1198,18 @@ class MainActivity : AppCompatActivity() {
 
         maybeAutoPrefetch(status)
         updateCoverageHint(status)
+
+        activeDestination?.let { dest ->
+            val currLat = status.lastLat ?: status.drLat ?: marker.position?.latitude
+            val currLon = status.lastLon ?: status.drLon ?: marker.position?.longitude
+            if (currLat != null && currLon != null) {
+                val remM = NavigationRouter.haversine(currLat, currLon, dest.latitude, dest.longitude)
+                val distStr = formatDistance(remM)
+                val sp = status.lastSpeedMps?.toDouble() ?: status.drSpeedMps
+                val timeStr = if (sp > 1.0) formatDuration((remM / sp).toLong()) else "~"
+                binding.tvNavStats.text = "$distStr remaining · ~$timeStr"
+            }
+        }
 
         binding.tvMatchSource.text = when {
             status.running && status.matchMap != null -> "Map matching · ${status.matchMap}"
@@ -1069,12 +1330,325 @@ class MainActivity : AppCompatActivity() {
                 ?: status.sessionPath?.let { "Last session: " + it.substringAfterLast('/') }
                 ?: "Sessions are written to Android/data/$packageName/files/sessions/"
         }
-        
-        // Rotate the marker to point in the direction the device is pointing
-        status.deviceAzimuth?.let { azimuth ->
-            marker.rotation = -azimuth // osmdroid rotations might need negation based on the map's orientation, we'll try -azimuth or azimuth
-            drMarker.rotation = -azimuth
+        // Smooth rotation is updated continuously at 25 Hz via SensorService.azimuth
+    }
+
+    private fun setupLayerToggles() {
+        updateLayerToggleUI()
+        binding.btnToggleGps.setOnClickListener {
+            hapticClick()
+            showGpsTrack = !showGpsTrack
+            updateLayerToggleUI()
+            trackLine.isEnabled = showGpsTrack
+            gpsQualityLines.forEach { it.isEnabled = showGpsTrack }
+            binding.map.invalidate()
         }
+        binding.btnToggleDr.setOnClickListener {
+            hapticClick()
+            showDrTrack = !showDrTrack
+            updateLayerToggleUI()
+            drLine.isEnabled = showDrTrack
+            drQualityLines.forEach { it.isEnabled = showDrTrack }
+            binding.map.invalidate()
+        }
+        binding.btnToggleSnap.setOnClickListener {
+            hapticClick()
+            showSnapTrack = !showSnapTrack
+            updateLayerToggleUI()
+            snapLine.isEnabled = showSnapTrack
+            binding.map.invalidate()
+        }
+    }
+
+    private fun updateLayerToggleUI() {
+        binding.btnToggleGps.alpha = if (showGpsTrack) 1.0f else 0.35f
+        binding.btnToggleDr.alpha = if (showDrTrack) 1.0f else 0.35f
+        binding.btnToggleSnap.alpha = if (showSnapTrack) 1.0f else 0.35f
+    }
+
+    private fun applyHeading(azimuthDeg: Float) {
+        if (isViewingHistory) return
+        latestKnownAzimuth = azimuthDeg
+
+        if (isHeadingUpMode) {
+            // HEADING-UP MODE:
+            // Location compass marker stays fixed pointing straight UP (0° relative to screen)
+            if (marker.rotation != 0f || drMarker.rotation != 0f) {
+                marker.rotation = 0f
+                drMarker.rotation = 0f
+            }
+
+            // The map rotates in the opposite direction (-azimuthDeg):
+            val targetMapOrientation = (-azimuthDeg + 360f) % 360f
+            var diff = (targetMapOrientation - currentMapOrientation) % 360f
+            if (diff > 180f) diff -= 360f
+            if (diff < -180f) diff += 360f
+
+            // Low-pass exponential smoothing for fluid motion
+            currentMapOrientation = (currentMapOrientation + diff * 0.35f + 360f) % 360f
+            binding.map.setMapOrientation(currentMapOrientation, false)
+
+            // Compass needle rotates to show true North
+            binding.ivCompassNeedle.rotation = currentMapOrientation
+
+            // Center location on screen while following
+            if (followPosition) {
+                val center = marker.position
+                    ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
+                if (center != null) {
+                    binding.map.controller.setCenter(center)
+                }
+            }
+            binding.map.invalidate()
+        } else {
+            // NORTH-UP MODE:
+            // Smoothly return map orientation to 0° if rotated
+            if (currentMapOrientation != 0f) {
+                var diff = (0f - currentMapOrientation) % 360f
+                if (diff > 180f) diff -= 360f
+                if (diff < -180f) diff += 360f
+                if (Math.abs(diff) < 1f) {
+                    currentMapOrientation = 0f
+                } else {
+                    currentMapOrientation = (currentMapOrientation + diff * 0.35f + 360f) % 360f
+                }
+                binding.map.setMapOrientation(currentMapOrientation, false)
+            }
+            binding.ivCompassNeedle.rotation = 0f
+
+            // Location marker rotates to reflect device compass heading
+            val targetMarkerRotation = (-azimuthDeg + 360f) % 360f
+            var diff = (targetMarkerRotation - currentMarkerRotation) % 360f
+            if (diff > 180f) diff -= 360f
+            if (diff < -180f) diff += 360f
+            currentMarkerRotation = (currentMarkerRotation + diff * 0.35f + 360f) % 360f
+            marker.rotation = currentMarkerRotation
+            drMarker.rotation = currentMarkerRotation
+            binding.map.invalidate()
+        }
+    }
+
+    private fun toggleHeadingUpMode(enabled: Boolean? = null) {
+        hapticClick()
+        val newState = enabled ?: !isHeadingUpMode
+        isHeadingUpMode = newState
+
+        binding.switchMapOrientation.isChecked = newState
+        binding.tvOrientationMode.text = if (newState) {
+            getString(R.string.heading_up_mode)
+        } else {
+            getString(R.string.north_up_mode)
+        }
+
+        binding.btnToggleOrientation.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(
+                this,
+                if (newState) R.color.brand_surface else R.color.overlay_card_glass
+            )
+        )
+
+        if (newState) {
+            followPosition = true
+            val here = marker.position
+                ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
+            if (here != null) {
+                binding.map.controller.setCenter(here)
+            }
+            Toast.makeText(this, "Heading-Up: Map rotates with heading", Toast.LENGTH_SHORT).show()
+        } else {
+            currentMapOrientation = 0f
+            binding.map.setMapOrientation(0f, true)
+            binding.ivCompassNeedle.rotation = 0f
+            Toast.makeText(this, "North-Up: Map fixed to North", Toast.LENGTH_SHORT).show()
+        }
+
+        applyHeading(latestKnownAzimuth)
+    }
+
+    private fun hapticClick() {
+        binding.root.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    private fun showHistoryDialog() {
+        hapticClick()
+        val sheet = BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.dialog_history, null)
+        sheet.setContentView(view)
+
+        val rv = view.findViewById<RecyclerView>(R.id.rvSessions)
+        val loading = view.findViewById<View>(R.id.historyLoading)
+        val empty = view.findViewById<View>(R.id.emptyHistoryView)
+        val tvCount = view.findViewById<TextView>(R.id.tvHistoryCount)
+
+        rv.layoutManager = LinearLayoutManager(this)
+
+        lifecycleScope.launch {
+            val sessions = SessionManager.listSessions(this@MainActivity)
+            loading.visibility = View.GONE
+            if (sessions.isEmpty()) {
+                empty.visibility = View.VISIBLE
+                tvCount.text = "0 sessions"
+            } else {
+                empty.visibility = View.GONE
+                tvCount.text = "${sessions.size} session${if (sessions.size > 1) "s" else ""}"
+                rv.adapter = SessionHistoryAdapter(sessions) { selected ->
+                    sheet.dismiss()
+                    loadAndDisplayHistory(selected)
+                }
+            }
+        }
+        sheet.show()
+    }
+
+    private fun loadAndDisplayHistory(summary: SessionManager.SessionSummary) {
+        lifecycleScope.launch {
+            Toast.makeText(this@MainActivity, "Loading session ${summary.id}…", Toast.LENGTH_SHORT).show()
+            val loaded = SessionManager.loadSession(summary)
+            isViewingHistory = true
+            historySession = loaded
+            followPosition = false
+
+            // Draw loaded tracks
+            trackLine.setPoints(loaded.gpsTrack.map { GeoPoint(it.lat, it.lon) })
+            drLine.setPoints(loaded.drTrack.map { GeoPoint(it.lat, it.lon) })
+            snapLine.setPoints(loaded.snapTrack.map { GeoPoint(it.lat, it.lon) })
+            rebuildQualitySegments(loaded.gpsTrack, trackLine, gpsQualityLines, 11f)
+
+            // Reset map orientation to 0 (North-Up) so historical track is framed upright
+            binding.map.setMapOrientation(0f, false)
+
+            // Hide live current position markers during history review
+            marker.isEnabled = false
+            drMarker.isEnabled = false
+
+            // Frame bounds
+            loaded.bounds?.let { bounds ->
+                binding.map.post { binding.map.zoomToBoundingBox(bounds, true) }
+            }
+
+            // Show History banner
+            binding.tvHistoryTitle.text = "Viewing: ${summary.formattedDate}"
+            val durSec = summary.durationSeconds.toLong()
+            val durStr = String.format(Locale.US, "%d:%02d", durSec / 60, durSec % 60)
+            binding.tvHistoryStats.text = "$durStr · ${compact(summary.imuSamples)} IMU · ${summary.gpsFixes} GPS fixes"
+            binding.historyBanner.visibility = View.VISIBLE
+
+            binding.map.invalidate()
+        }
+    }
+
+    private fun exitHistoryMode() {
+        hapticClick()
+        isViewingHistory = false
+        historySession = null
+        binding.historyBanner.visibility = View.GONE
+
+        marker.isEnabled = true
+        drMarker.isEnabled = true
+
+        // Restore live or recorded tracks from service
+        val liveTrack = SensorService.track.value
+        val liveDr = SensorService.drTrack.value
+        val liveSnap = SensorService.snapTrack.value
+        trackSize = 0
+        drSize = 0
+        snapSize = 0
+        drawTrack(liveTrack)
+        drawDrTrack(liveDr)
+        drawSnapTrack(liveSnap)
+
+        centreOnMe()
+        if (isHeadingUpMode) {
+            applyHeading(latestKnownAzimuth)
+        }
+    }
+
+    private class SessionHistoryAdapter(
+        private val items: List<SessionManager.SessionSummary>,
+        private val onSelect: (SessionManager.SessionSummary) -> Unit,
+    ) : RecyclerView.Adapter<SessionHistoryAdapter.ViewHolder>() {
+
+        class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+            val tvDate: TextView = view.findViewById(R.id.tvSessionDate)
+            val tvId: TextView = view.findViewById(R.id.tvSessionId)
+            val tvDuration: TextView = view.findViewById(R.id.tvSessionDuration)
+            val tvSamples: TextView = view.findViewById(R.id.tvSessionSamples)
+            val btnView: View = view.findViewById(R.id.btnViewTrack)
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+            val view = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_session_history, parent, false)
+            return ViewHolder(view)
+        }
+
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            val s = items[position]
+            holder.tvDate.text = s.formattedDate
+            holder.tvId.text = s.id
+            val mins = (s.durationSeconds / 60).toInt()
+            val secs = (s.durationSeconds % 60).toInt()
+            holder.tvDuration.text = String.format(Locale.US, "%d:%02d duration", mins, secs)
+            val imuText = if (s.imuSamples >= 1000) "${s.imuSamples / 1000}k IMU" else "${s.imuSamples} IMU"
+            holder.tvSamples.text = "${s.gpsFixes} fixes · $imuText"
+            holder.btnView.setOnClickListener { onSelect(s) }
+            holder.itemView.setOnClickListener { onSelect(s) }
+        }
+
+        override fun getItemCount(): Int = items.size
+    }
+
+    private fun isLocationEnabled(): Boolean {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lm.isLocationEnabled
+        } else {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun checkAndRefreshLocation() {
+        if (!hasFineLocation()) return
+        if (!isLocationEnabled()) return
+
+        // Re-enable osmdroid's MyLocation overlay so it registers with newly active providers
+        if (::locationOverlay.isInitialized) {
+            locationOverlay.disableMyLocation()
+            locationOverlay.enableMyLocation()
+            if (followPosition) locationOverlay.enableFollowLocation()
+        }
+
+        // Fetch location immediately via Google Play Services Fused Location
+        fusedLocationClient.lastLocation.addOnSuccessListener { loc ->
+            if (loc != null) {
+                onImmediateLocationFound(loc)
+            } else {
+                fusedLocationClient.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    null
+                ).addOnSuccessListener { freshLoc ->
+                    if (freshLoc != null) onImmediateLocationFound(freshLoc)
+                }
+            }
+        }
+    }
+
+    private fun onImmediateLocationFound(loc: Location) {
+        val here = GeoPoint(loc.latitude, loc.longitude)
+        marker.position = here
+        if (followPosition && !isViewingHistory) {
+            val visible = visibleRadiusKm()
+            if (!hasInitialCentered || visible == null || visible > CENTRE_RADIUS_KM) {
+                hasInitialCentered = true
+                val box = TilePrefetcher.boundingBox(here, CENTRE_RADIUS_KM)
+                binding.map.post { binding.map.zoomToBoundingBox(box, true) }
+            } else {
+                binding.map.controller.animateTo(here)
+            }
+        }
+        binding.map.invalidate()
     }
 
     private fun formatDistance(metres: Double): String =
@@ -1166,5 +1740,274 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }, "map-extract").start()
+    }
+
+    // ------------------------------------------------------------------ navigation & calibration
+
+    private fun showCalibrationDialog() {
+        hapticClick()
+        val dialogView = layoutInflater.inflate(R.layout.dialog_calibration, null)
+        val dialog = BottomSheetDialog(this)
+        dialog.setContentView(dialogView)
+
+        val ivInfinity = dialogView.findViewById<ImageView>(R.id.ivInfinity)
+        val chipAccuracy = dialogView.findViewById<TextView>(R.id.chipAccuracyStatus)
+        val btnAccurateMag = dialogView.findViewById<Button>(R.id.btnAccurateMag)
+        val btnGyroModelYaw = dialogView.findViewById<Button>(R.id.btnGyroModelYaw)
+
+        // Visual swirl animation for figure-8 / infinity icon
+        val rotateAnim = android.view.animation.RotateAnimation(
+            -20f, 20f,
+            android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f,
+            android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f
+        ).apply {
+            duration = 800
+            repeatMode = android.view.animation.Animation.REVERSE
+            repeatCount = android.view.animation.Animation.INFINITE
+        }
+        ivInfinity.startAnimation(rotateAnim)
+
+        // Real-time sensor accuracy monitor during swirling
+        val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        val magSensor = sm?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        val magListener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {}
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+                when (accuracy) {
+                    SensorManager.SENSOR_STATUS_UNRELIABLE -> {
+                        chipAccuracy.text = getString(R.string.accuracy_uncalibrated)
+                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_weak))
+                    }
+                    SensorManager.SENSOR_STATUS_ACCURACY_LOW -> {
+                        chipAccuracy.text = getString(R.string.accuracy_low)
+                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_weak))
+                    }
+                    SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM -> {
+                        chipAccuracy.text = getString(R.string.accuracy_medium)
+                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_idle))
+                    }
+                    SensorManager.SENSOR_STATUS_ACCURACY_HIGH -> {
+                        chipAccuracy.text = getString(R.string.accuracy_high)
+                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_good))
+                    }
+                }
+            }
+        }
+
+        if (magSensor != null && sm != null) {
+            sm.registerListener(magListener, magSensor, SensorManager.SENSOR_DELAY_UI)
+        }
+
+        fun cleanup() {
+            ivInfinity.clearAnimation()
+            if (magSensor != null && sm != null) {
+                sm.unregisterListener(magListener)
+            }
+        }
+
+        btnAccurateMag.setOnClickListener {
+            hapticClick()
+            cleanup()
+            dialog.dismiss()
+            SensorService.useMagnetometerYaw = true
+            getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
+                .putBoolean("use_magnetometer_yaw", true).apply()
+            startRecording()
+        }
+
+        btnGyroModelYaw.setOnClickListener {
+            hapticClick()
+            cleanup()
+            dialog.dismiss()
+            SensorService.useMagnetometerYaw = false
+            getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
+                .putBoolean("use_magnetometer_yaw", false).apply()
+            startRecording()
+        }
+
+        dialog.setOnDismissListener {
+            cleanup()
+        }
+
+        dialog.show()
+    }
+
+    private fun setupDestinationSearch() {
+        binding.rvSearchSuggestions.layoutManager = LinearLayoutManager(this)
+        var searchJob: kotlinx.coroutines.Job? = null
+
+        binding.etSearchDestination.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val query = s?.toString()?.trim().orEmpty()
+                binding.btnClearSearch.visibility = if (query.isNotEmpty()) View.VISIBLE else View.GONE
+                searchJob?.cancel()
+                if (query.length >= 3) {
+                    searchJob = lifecycleScope.launch {
+                        delay(350)
+                        val loc = marker.position
+                            ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
+                        val results = NavigationRouter.searchPlaces(query, loc?.latitude, loc?.longitude)
+                        if (results.isNotEmpty()) {
+                            binding.rvSearchSuggestions.visibility = View.VISIBLE
+                            binding.rvSearchSuggestions.adapter = SearchSuggestionAdapter(results, loc) { selected ->
+                                binding.etSearchDestination.setText(selected.title)
+                                binding.rvSearchSuggestions.visibility = View.GONE
+                                hideKeyboard()
+                                navigateTo(GeoPoint(selected.lat, selected.lon), selected.title)
+                            }
+                        } else {
+                            binding.rvSearchSuggestions.visibility = View.GONE
+                        }
+                    }
+                } else {
+                    binding.rvSearchSuggestions.visibility = View.GONE
+                }
+            }
+        })
+
+        binding.btnClearSearch.setOnClickListener {
+            hapticClick()
+            binding.etSearchDestination.text?.clear()
+            binding.rvSearchSuggestions.visibility = View.GONE
+        }
+
+        binding.btnExitNav.setOnClickListener {
+            hapticClick()
+            clearNavigation()
+        }
+    }
+
+    private fun navigateTo(dest: GeoPoint, title: String) {
+        activeDestination = dest
+        activeDestinationName = title
+
+        destinationMarker?.let { dm ->
+            dm.position = dest
+            dm.title = title
+            dm.isEnabled = true
+            if (!binding.map.overlays.contains(dm)) {
+                binding.map.overlays.add(dm)
+            }
+        }
+
+        binding.navHudCard.visibility = View.VISIBLE
+        binding.tvNavTitle.text = title
+        binding.tvNavStats.text = "Calculating route…"
+
+        val start = marker.position
+            ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
+            ?: SensorService.status.value.let { s ->
+                if (s.lastLat != null && s.lastLon != null) GeoPoint(s.lastLat, s.lastLon) else null
+            }
+            ?: dest
+
+        lifecycleScope.launch {
+            if (roadNetwork == null) {
+                roadNetwork = openLocalRoadNetwork()
+            }
+            val route = NavigationRouter.calculateRoute(
+                start = start,
+                dest = dest,
+                roadNetwork = roadNetwork,
+                destinationName = title,
+            )
+            if (route != null && route.points.isNotEmpty()) {
+                routeLine.setPoints(route.points)
+                routeLine.isEnabled = true
+                val distStr = formatDistance(route.distanceM)
+                val method = if (route.isOffline) "Offline A*" else "OSRM"
+                binding.tvNavStats.text = "$distStr via $method"
+
+                val maxLat = route.points.maxOf { it.latitude }
+                val minLat = route.points.minOf { it.latitude }
+                val maxLon = route.points.maxOf { it.longitude }
+                val minLon = route.points.minOf { it.longitude }
+                val latPad = ((maxLat - minLat) * 0.1).coerceAtLeast(0.002)
+                val lonPad = ((maxLon - minLon) * 0.1).coerceAtLeast(0.002)
+                val box = BoundingBox(
+                    (maxLat + latPad).coerceAtMost(85.0),
+                    (maxLon + lonPad).coerceAtMost(180.0),
+                    (minLat - latPad).coerceAtLeast(-85.0),
+                    (minLon - lonPad).coerceAtLeast(-180.0),
+                )
+                binding.map.post { binding.map.zoomToBoundingBox(box, true) }
+            } else {
+                Toast.makeText(this@MainActivity, "Could not compute route to destination", Toast.LENGTH_SHORT).show()
+                val remM = NavigationRouter.haversine(start.latitude, start.longitude, dest.latitude, dest.longitude)
+                binding.tvNavStats.text = "Direct distance: ${formatDistance(remM)}"
+            }
+            binding.map.invalidate()
+        }
+    }
+
+    private fun clearNavigation() {
+        activeDestination = null
+        activeDestinationName = null
+        destinationMarker?.isEnabled = false
+        routeLine.setPoints(emptyList())
+        routeLine.isEnabled = false
+        binding.navHudCard.visibility = View.GONE
+        binding.etSearchDestination.text?.clear()
+        binding.rvSearchSuggestions.visibility = View.GONE
+        hideKeyboard()
+        binding.map.invalidate()
+    }
+
+    private fun openLocalRoadNetwork(): RoadNetwork? {
+        val map = MapsforgeSource.mapFiles(this).firstOrNull() ?: return null
+        return try {
+            RoadNetwork(map)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed opening local RoadNetwork: ${e.message}")
+            null
+        }
+    }
+
+    private fun hideKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        val view = currentFocus ?: binding.root
+        imm?.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+
+    private class SearchSuggestionAdapter(
+        private val items: List<NavigationRouter.SearchResult>,
+        private val currentLoc: GeoPoint?,
+        private val onSelect: (NavigationRouter.SearchResult) -> Unit,
+    ) : RecyclerView.Adapter<SearchSuggestionAdapter.ViewHolder>() {
+
+        class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+            val tvTitle: TextView = view.findViewById(R.id.tvPlaceTitle)
+            val tvSubtitle: TextView = view.findViewById(R.id.tvPlaceSubtitle)
+            val tvDistance: TextView = view.findViewById(R.id.tvPlaceDistance)
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+            val view = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_search_suggestion, parent, false)
+            return ViewHolder(view)
+        }
+
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            val item = items[position]
+            holder.tvTitle.text = item.title
+            holder.tvSubtitle.text = item.subtitle
+            val dist = item.distanceM ?: if (currentLoc != null) {
+                NavigationRouter.haversine(currentLoc.latitude, currentLoc.longitude, item.lat, item.lon)
+            } else null
+
+            if (dist != null) {
+                holder.tvDistance.text = if (dist >= 1000) String.format(Locale.US, "%.1f km", dist / 1000.0)
+                else String.format(Locale.US, "%.0f m", dist)
+                holder.tvDistance.visibility = View.VISIBLE
+            } else {
+                holder.tvDistance.visibility = View.GONE
+            }
+            holder.itemView.setOnClickListener { onSelect(item) }
+        }
+
+        override fun getItemCount(): Int = items.size
     }
 }
