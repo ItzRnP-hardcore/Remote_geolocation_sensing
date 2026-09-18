@@ -86,8 +86,17 @@ class SensorService : Service() {
         @Volatile
         var useMagnetometerYaw = false
 
+        /**
+         * Steer outages with the model's yaw head. OFF: measured on this phone its output is
+         * never negative, so every outage turned clockwise whichever way the car went - 96.6%
+         * drift at 60 s against 7.5% for the calibrated compass. See CompassHeading.
+         */
         @Volatile
-        var useModelYawHead = true
+        var useModelYawHead = false
+
+        /** Steer outages with the calibrated compass (set by the figure-eight dialog). */
+        @Volatile
+        var useCompassHeading = false
 
         @Volatile
         var isPhoneFixed = true
@@ -251,6 +260,17 @@ class SensorService : Service() {
     
     // Calibration Logic
     private var calibrationStartTimeNs = 0L
+
+    /** Vehicle heading from the calibrated compass. Logger thread only. */
+    private val compassHeading = CompassHeading()
+    private val rvMatrix = FloatArray(9)
+    private var haveRvMatrix = false
+    private var prevFixBearing = Double.NaN
+    private var prevFixNs = 0L
+    private var headingWriter: BufferedWriter? = null
+
+    /** Which estimator steered the most recent unaided step, for heading.csv. */
+    private var headingSource = "gnss"
     private var isCalibrating = true
 
     // Everything below is touched only on the logger thread.
@@ -597,6 +617,11 @@ class SensorService : Service() {
         alongRoadActive = false
         matchHandler.post { mapMatcher?.reset(); alongRoad.reset() }
         deadReckoner.reset()
+        compassHeading.reset()
+        haveRvMatrix = false
+        prevFixBearing = Double.NaN
+        prevFixNs = 0L
+        headingSource = "gnss"
         calibrationStartTimeNs = 0L
         isCalibrating = true
         lastMLFeedTimeNanos = 0L
@@ -644,6 +669,12 @@ class SensorService : Service() {
 
         drWriter = openWriter(dir, "deadreckon.csv")
         drWriter?.write("t_ns,lat,lon,speed_mps,drift_m,bias_e,bias_n,bias_u,stationary,free_run,gyro_bias_x,gyro_bias_y,gyro_bias_z,gyro_bias_valid\n")
+
+        // The compass pipeline, stage by stage, so a drive can be checked afterwards: is the
+        // mount offset converging, was the field disturbed, and what actually steered the car.
+        headingWriter = openWriter(dir, "heading.csv")
+        headingWriter?.write("t_ns,phone_azimuth_deg,mount_offset_deg,mount_samples," +
+            "compass_vehicle_deg,filtered_heading_deg,dr_heading_deg,field_ut_disturbed,source\n")
 
         acquireWakeLock()
         registerSensors()
@@ -790,7 +821,7 @@ class SensorService : Service() {
     private fun closeSession() {
         sessionDir?.let { writeSessionMetadata(it, finished = true) }
         for (w in listOfNotNull(imuWriter, gpsWriter, gnssWriter, gnssRawWriter,
-                                gnssNavWriter, drWriter, mlWriter, matchWriter)) {
+                                gnssNavWriter, drWriter, headingWriter, mlWriter, matchWriter)) {
             try {
                 w.flush()
                 w.close()
@@ -804,6 +835,7 @@ class SensorService : Service() {
         gnssRawWriter = null
         gnssNavWriter = null
         drWriter = null
+        headingWriter = null
         mlWriter = null
         matchWriter = null
     }
@@ -827,6 +859,7 @@ class SensorService : Service() {
                 // even when the PROVIDERS_CHANGED broadcast never arrives.
                 ensureLocationSubscribed()
                 drWriter?.flush()
+                headingWriter?.flush()
                 mlWriter?.flush()
                 matchWriter?.flush()
             } catch (e: Exception) {
@@ -1053,8 +1086,23 @@ class SensorService : Service() {
                             val gy = event.values[1] - gb[1].toFloat()
                             val gz = event.values[2] - gb[2].toFloat()
                             val wU = rotationMatrix[6] * gx + rotationMatrix[7] * gy + rotationMatrix[8] * gz
-                            if (!useModelYawHead) {
-                                deadReckoner.onYawRate(-wU.toDouble(), dtG)
+                            // Clockwise-positive, to match a compass bearing.
+                            val yawCw = -wU.toDouble()
+                            // Priority: calibrated compass (gyro-smoothed) > gyro alone > model
+                            // yaw head. The head only runs if explicitly re-enabled.
+                            var steered = false
+                            if (useCompassHeading && compassHeading.mountCalibrated) {
+                                val h = compassHeading.step(yawCw, dtG)
+                                if (!h.isNaN()) {
+                                    deadReckoner.setHeadingDeg(h)
+                                    headingSource = if (compassHeading.disturbed) "gyro(mag-disturbed)"
+                                    else "compass"
+                                    steered = true
+                                }
+                            }
+                            if (!steered && !useModelYawHead) {
+                                deadReckoner.onYawRate(yawCw, dtG)
+                                headingSource = "gyro"
                             }
                         }
                     }
@@ -1063,6 +1111,14 @@ class SensorService : Service() {
                     if (useMagnetometerYaw) {
                         deadReckoner.onRotationVector(event.values)
                     }
+                    // The compass always reads the magnetometer-referenced attitude, whatever
+                    // the integrator uses: game_rv has no north to learn an offset against.
+                    SensorManager.getRotationMatrixFromVector(rvMatrix, event.values)
+                    haveRvMatrix = true
+                    compassHeading.onRotation(rvMatrix, lastGrav[0], lastGrav[1], lastGrav[2])
+                }
+                Sensor.TYPE_MAGNETIC_FIELD -> {
+                    compassHeading.onMagnetometer(event.values[0], event.values[1], event.values[2])
                 }
                 Sensor.TYPE_GAME_ROTATION_VECTOR -> {
                     if (!useMagnetometerYaw) {
@@ -1311,6 +1367,22 @@ class SensorService : Service() {
         // corrects it at all.
         val healthy = satellitesUsedInFix >= 4 &&
             (!location.hasAccuracy() || location.accuracy < 20f)
+        // Teach the compass how the phone sits in the car. Straight, brisk, healthy driving is
+        // the only time GNSS bearing equals the car's heading, and it is free while it lasts.
+        // Not in free-run: that mode simulates a tunnel, and re-seeding the heading from GNSS
+        // every second would feed the answer into the test.
+        if (!freeRunRequested && healthy && location.hasBearing() && location.hasSpeed()) {
+            val b = location.bearing.toDouble()
+            val nowNs = location.elapsedRealtimeNanos
+            val turnDps = if (prevFixBearing.isNaN() || prevFixNs == 0L) 0.0
+            else CompassHeading.wrap180(b - prevFixBearing) /
+                ((nowNs - prevFixNs) / 1e9).coerceAtLeast(0.2)
+            compassHeading.onGnss(b, location.speed.toDouble(), turnDps)
+            prevFixBearing = b
+            prevFixNs = nowNs
+            headingSource = "gnss"
+        }
+
         if (!freeRunRequested && healthy) {
             deadReckoner.anchorTo(
                 location.latitude,
@@ -1344,6 +1416,19 @@ class SensorService : Service() {
             .append(g[0]).append(',').append(g[1]).append(',').append(g[2]).append(',')
             .append(if (deadReckoner.gyroBiasValid) 1 else 0).append('\n')
         writeRow(drWriter, sb)
+
+        val c = compassHeading
+        sb.setLength(0)
+        sb.append(tNs).append(',')
+            .append(c.phoneAzimuthDeg).append(',')
+            .append(c.mountOffsetDeg).append(',')
+            .append(c.mountSamples).append(',')
+            .append(c.compassVehicleDeg).append(',')
+            .append(c.headingDeg).append(',')
+            .append(Math.toDegrees(deadReckoner.headingRad)).append(',')
+            .append(if (c.disturbed) 1 else 0).append(',')
+            .append(headingSource).append('\n')
+        writeRow(headingWriter, sb)
     }
 
     @SuppressLint("MissingPermission")

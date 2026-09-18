@@ -265,6 +265,22 @@ class DeadReckoner {
         }
     }
 
+    /**
+     * Take the heading from an absolute reference - the calibrated compass - rather than
+     * integrating a rate. Degrees clockwise from north. The velocity vector is re-pointed so
+     * the along-track speed carries on in the new direction, exactly as [onYawRate] does.
+     */
+    fun setHeadingDeg(deg: Double) {
+        if (deg.isNaN()) return
+        var r = Math.toRadians(deg) % (2.0 * Math.PI)
+        if (r < 0.0) r += 2.0 * Math.PI
+        headingRad = r
+        if (isPhoneFixed && forwardSpeed > 0.0) {
+            vE = forwardSpeed * kotlin.math.sin(headingRad)
+            vN = forwardSpeed * kotlin.math.cos(headingRad)
+        }
+    }
+
     // ------------------------------------------------------------------ inputs
 
     /** Latest attitude, as the rotation-vector values straight off the sensor. */

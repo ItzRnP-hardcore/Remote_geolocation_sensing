@@ -66,11 +66,20 @@
                 android:orientation="vertical"
                 android:padding="20dp">
 
-                <ImageView
-                    android:id="@+id/ivInfinity"
-                    android:layout_width="72dp"
-                    android:layout_height="72dp"
-                    android:src="@drawable/ic_infinity" />
+                <com.example.imulogger.Figure8View
+                    android:id="@+id/figure8"
+                    android:layout_width="match_parent"
+                    android:layout_height="128dp"
+                    android:contentDescription="@string/swirl_instruction" />
+
+                <TextView
+                    android:id="@+id/tvCalibrationProgress"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/calibration_progress_start"
+                    android:textColor="@color/on_overlay_secondary"
+                    android:textSize="12sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
@@ -108,12 +117,12 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Accuracy Verification Question -->
+        <!-- What happens next: the mount is aligned automatically while driving -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:text="@string/compass_verify_question"
+            android:text="@string/mount_next_title"
             android:textColor="@color/on_overlay_primary"
             android:textSize="15sp"
             android:textStyle="bold" />
@@ -122,33 +131,32 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="@string/compass_verify_hint"
+            android:text="@string/mount_next_hint"
             android:textColor="@color/on_overlay_muted"
             android:textSize="12sp" />
 
-        <!-- Decision Buttons -->
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnAccurateMag"
+            android:id="@+id/btnCompassContinue"
             style="@style/Widget.Material3.Button"
             android:layout_width="match_parent"
             android:layout_height="50dp"
             android:layout_marginTop="16dp"
-            android:text="@string/use_magnetometer_truth"
+            android:enabled="false"
+            android:text="@string/calibration_continue_waiting"
             android:textSize="14sp"
             android:textStyle="bold"
             app:backgroundTint="@color/quality_good"
             app:cornerRadius="14dp" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnGyroModelYaw"
-            style="@style/Widget.Material3.Button.TonalButton"
+            android:id="@+id/btnSkipCompass"
+            style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="match_parent"
-            android:layout_height="50dp"
-            android:layout_marginTop="8dp"
-            android:text="@string/use_gyro_model_truth"
-            android:textColor="@color/on_overlay_primary"
-            android:textSize="14sp"
-            android:textStyle="bold"
+            android:layout_height="44dp"
+            android:layout_marginTop="4dp"
+            android:text="@string/calibration_skip"
+            android:textColor="@color/on_overlay_secondary"
+            android:textSize="13sp"
             app:cornerRadius="14dp" />
 
     </LinearLayout>

@@ -196,6 +196,7 @@ class MainActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences("imu_prefs", Context.MODE_PRIVATE)
         SensorService.useMagnetometerYaw = prefs.getBoolean("use_magnetometer_yaw", false)
+        SensorService.useCompassHeading = prefs.getBoolean("use_compass_heading", false)
         SensorService.isPhoneFixed = prefs.getBoolean("is_phone_fixed", true)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -927,9 +928,14 @@ class MainActivity : AppCompatActivity() {
         val swMagYaw = view.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.swMagnetometerYaw)
         swMagYaw?.isChecked = SensorService.useMagnetometerYaw
         swMagYaw?.setOnCheckedChangeListener { _, checked ->
+            // One switch, both halves: the compass heading is only meaningful if the
+            // integrator's attitude shares its north, so the two never diverge.
             SensorService.useMagnetometerYaw = checked
+            SensorService.useCompassHeading = checked
             getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
-                .putBoolean("use_magnetometer_yaw", checked).apply()
+                .putBoolean("use_magnetometer_yaw", checked)
+                .putBoolean("use_compass_heading", checked)
+                .apply()
         }
         view.findViewById<View>(R.id.cardMagYaw)?.setOnClickListener {
             swMagYaw?.toggle()
@@ -1744,92 +1750,107 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ navigation & calibration
 
+    /**
+     * Figure-eight compass calibration, before the phone goes on the stand.
+     *
+     * The animation shows the gesture; [CalibrationTracker] measures it. Continue unlocks only
+     * once the magnetometer has been seen from enough directions AND the OS agrees it has a
+     * fit, so the result no longer depends on the user guessing whether a compass is "accurate".
+     * Choosing the compass also switches the integrator's attitude to the magnetometer-
+     * referenced rotation vector: game_rv has no north, and measured on a recorded drive its
+     * frame wandered -100 to +48 deg from true, leaking a quarter of the centripetal
+     * acceleration into forward speed on every turn.
+     */
     private fun showCalibrationDialog() {
         hapticClick()
         val dialogView = layoutInflater.inflate(R.layout.dialog_calibration, null)
         val dialog = BottomSheetDialog(this)
         dialog.setContentView(dialogView)
 
-        val ivInfinity = dialogView.findViewById<ImageView>(R.id.ivInfinity)
+        val figure8 = dialogView.findViewById<Figure8View>(R.id.figure8)
+        val tvProgress = dialogView.findViewById<TextView>(R.id.tvCalibrationProgress)
         val chipAccuracy = dialogView.findViewById<TextView>(R.id.chipAccuracyStatus)
-        val btnAccurateMag = dialogView.findViewById<Button>(R.id.btnAccurateMag)
-        val btnGyroModelYaw = dialogView.findViewById<Button>(R.id.btnGyroModelYaw)
+        val btnContinue = dialogView.findViewById<Button>(R.id.btnCompassContinue)
+        val btnSkip = dialogView.findViewById<Button>(R.id.btnSkipCompass)
 
-        // Visual swirl animation for figure-8 / infinity icon
-        val rotateAnim = android.view.animation.RotateAnimation(
-            -20f, 20f,
-            android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f,
-            android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f
-        ).apply {
-            duration = 800
-            repeatMode = android.view.animation.Animation.REVERSE
-            repeatCount = android.view.animation.Animation.INFINITE
+        val tracker = CalibrationTracker()
+
+        fun showAccuracy(accuracy: Int) {
+            val (text, color) = when (accuracy) {
+                SensorManager.SENSOR_STATUS_ACCURACY_HIGH ->
+                    R.string.accuracy_high to R.color.quality_good
+                SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM ->
+                    R.string.accuracy_medium to R.color.quality_idle
+                SensorManager.SENSOR_STATUS_ACCURACY_LOW ->
+                    R.string.accuracy_low to R.color.quality_weak
+                else -> R.string.accuracy_uncalibrated to R.color.quality_weak
+            }
+            chipAccuracy.text = getString(text)
+            chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, color))
         }
-        ivInfinity.startAnimation(rotateAnim)
 
-        // Real-time sensor accuracy monitor during swirling
+        fun render() {
+            figure8.progress = tracker.progress.toFloat()
+            if (tracker.done) {
+                if (!figure8.complete) {
+                    figure8.complete = true
+                    hapticClick()
+                }
+                tvProgress.text = getString(R.string.calibration_progress_done)
+                btnContinue.isEnabled = true
+                btnContinue.text = getString(R.string.calibration_continue)
+            } else {
+                tvProgress.text = getString(R.string.calibration_progress,
+                    (tracker.progress * 100).toInt())
+            }
+            showAccuracy(tracker.accuracy)
+        }
+
         val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         val magSensor = sm?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         val magListener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {}
+            override fun onSensorChanged(event: SensorEvent) {
+                tracker.onSample(event.timestamp, event.values[0], event.values[1],
+                    event.values[2], event.accuracy)
+                render()
+            }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-                when (accuracy) {
-                    SensorManager.SENSOR_STATUS_UNRELIABLE -> {
-                        chipAccuracy.text = getString(R.string.accuracy_uncalibrated)
-                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_weak))
-                    }
-                    SensorManager.SENSOR_STATUS_ACCURACY_LOW -> {
-                        chipAccuracy.text = getString(R.string.accuracy_low)
-                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_weak))
-                    }
-                    SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM -> {
-                        chipAccuracy.text = getString(R.string.accuracy_medium)
-                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_idle))
-                    }
-                    SensorManager.SENSOR_STATUS_ACCURACY_HIGH -> {
-                        chipAccuracy.text = getString(R.string.accuracy_high)
-                        chipAccuracy.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.quality_good))
-                    }
-                }
+                tracker.onAccuracy(accuracy)
+                render()
             }
         }
-
         if (magSensor != null && sm != null) {
-            sm.registerListener(magListener, magSensor, SensorManager.SENSOR_DELAY_UI)
+            sm.registerListener(magListener, magSensor, SensorManager.SENSOR_DELAY_GAME)
+        } else {
+            // No magnetometer at all: there is nothing to calibrate, so offer only the gyro.
+            btnContinue.isEnabled = false
+            tvProgress.text = getString(R.string.accuracy_uncalibrated)
         }
 
+        var cleaned = false
         fun cleanup() {
-            ivInfinity.clearAnimation()
-            if (magSensor != null && sm != null) {
-                sm.unregisterListener(magListener)
-            }
+            if (cleaned) return
+            cleaned = true
+            if (magSensor != null && sm != null) sm.unregisterListener(magListener)
         }
 
-        btnAccurateMag.setOnClickListener {
+        fun choose(useCompass: Boolean) {
             hapticClick()
             cleanup()
             dialog.dismiss()
-            SensorService.useMagnetometerYaw = true
+            SensorService.useMagnetometerYaw = useCompass
+            SensorService.useCompassHeading = useCompass
             getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
-                .putBoolean("use_magnetometer_yaw", true).apply()
+                .putBoolean("use_magnetometer_yaw", useCompass)
+                .putBoolean("use_compass_heading", useCompass)
+                .apply()
             startRecording()
         }
 
-        btnGyroModelYaw.setOnClickListener {
-            hapticClick()
-            cleanup()
-            dialog.dismiss()
-            SensorService.useMagnetometerYaw = false
-            getSharedPreferences("imu_prefs", Context.MODE_PRIVATE).edit()
-                .putBoolean("use_magnetometer_yaw", false).apply()
-            startRecording()
-        }
-
-        dialog.setOnDismissListener {
-            cleanup()
-        }
-
+        btnContinue.setOnClickListener { choose(useCompass = true) }
+        btnSkip.setOnClickListener { choose(useCompass = false) }
+        dialog.setOnDismissListener { cleanup() }
         dialog.show()
     }
 
