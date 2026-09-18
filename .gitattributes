@@ -1,0 +1,10 @@
+# Binary artifacts. Git's text/binary guess looks for a NUL in the first 8 KB, and a
+# ReportLab PDF has none there - so without this, core.autocrlf rewrote their line
+# endings, broke the xref offsets, and a fresh checkout needed repairing to open.
+*.pdf   binary
+*.pptx  binary
+*.png   binary
+*.pt    binary
+*.pth   binary
+*.npz   binary
+*.map   binary
