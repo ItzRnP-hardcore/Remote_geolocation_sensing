@@ -481,22 +481,39 @@ class DeadReckoner {
      * Blend a model speed estimate into the velocity magnitude, leaving direction untouched.
      */
     fun applyModelSpeed(modelSpeedMps: Double, weight: Double): Double {
-        val sp = speed
-        if (sp < MIN_SPEED_FOR_MODEL_FIX) return 0.0
-        val w = weight.coerceIn(0.0, 1.0)
-        if (w <= 0.0) return 0.0
-
         val target = modelSpeedMps.coerceAtLeast(0.0)
-        val blended = sp + w * (target - sp)
+        val w = weight.coerceIn(0.0, 1.0)
+        if (w <= 0.0 && target == 0.0) return 0.0
+
+        // If the model predicts moving speed and we are not asserted stationary, wake from standstill
+        if (target >= 0.3 && !isStationaryModel) {
+            isStationary = false
+            stillFor = 0.0
+        }
+
+        val sp = speed
+        val blended = if (sp < 0.3) {
+            // Waking from standstill: accept the model's speed target directly
+            target
+        } else {
+            // Already moving: blend smoothly with integrator speed
+            sp + w * (target - sp)
+        }
+
         val delta = blended - sp
         forwardSpeed = blended
         if (isPhoneFixed) {
             vE = forwardSpeed * kotlin.math.sin(headingRad)
             vN = forwardSpeed * kotlin.math.cos(headingRad)
         } else {
-            val scale = blended / sp
-            vE *= scale
-            vN *= scale
+            if (sp > 0.01) {
+                val scale = blended / sp
+                vE *= scale
+                vN *= scale
+            } else {
+                vE = forwardSpeed * kotlin.math.sin(headingRad)
+                vN = forwardSpeed * kotlin.math.cos(headingRad)
+            }
         }
         modelSpeedCorrectionMps += abs(delta)
         return delta

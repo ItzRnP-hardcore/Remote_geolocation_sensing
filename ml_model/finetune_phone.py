@@ -119,8 +119,10 @@ def main():
     # Model architecture
     model = TCNModel(channels=(64, 64, 64, 64, 64, 64), dilations=(1, 2, 4, 8, 16, 32))
 
-    # Load initial weights from base earth checkpoint if available
-    init_weights = "ml_model/model_tcn_base_earth_s0.pth"
+    # Load initial weights from IOVNBD wide earth checkpoint
+    init_weights = "ml_model/model_tcn_base_wide_earth.pth"
+    if not os.path.exists(init_weights):
+        init_weights = "ml_model/model_tcn_base_earth_s0.pth"
     if not os.path.exists(init_weights):
         init_weights = "ml_model/model_tcn_base_fx.pth"
     if os.path.exists(init_weights):

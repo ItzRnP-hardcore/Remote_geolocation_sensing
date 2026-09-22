@@ -212,16 +212,16 @@ object SessionRecomputer {
 
                                     if (out != null) {
                                         val statLogit = out[IMUModelRunner.IDX_STATIONARY]
-                                        // Stationarity logit for Dual ZUPT clamping
-                                        if (statLogit >= IMUModelRunner.STATIONARY_LOGIT_THRESHOLD) {
-                                            dr.onStationarySignal(true)
-                                        }
+                                        val isStat = statLogit >= IMUModelRunner.STATIONARY_LOGIT_THRESHOLD
+                                        // Stationarity logit for Dual ZUPT clamping: correctly pass true or false!
+                                        dr.onStationarySignal(isStat)
 
-                                        // Apply model speed only when explicitly enabled and confident
-                                        if (IMUModelRunner.speedFusionEnabled) {
+                                        // Apply model speed when moving to advance dead reckoner at vehicle speed
+                                        if (!isStat) {
                                             val mu = out[IMUModelRunner.IDX_MU]
                                             val logvar = out[IMUModelRunner.IDX_LOGVAR]
-                                            dr.applyModelSpeed(mu.toDouble(), IMUModelRunner.fusionWeight(logvar))
+                                            val weight = IMUModelRunner.fusionWeight(logvar)
+                                            dr.applyModelSpeed(mu.toDouble(), weight)
                                         }
                                     }
                                 }

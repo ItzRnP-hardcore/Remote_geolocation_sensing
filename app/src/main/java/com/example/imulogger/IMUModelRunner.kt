@@ -59,7 +59,7 @@ class IMUModelRunner(context: Context) {
          * constant baseline.
          */
         @Volatile
-        var speedFusionEnabled = false
+        var speedFusionEnabled = true
 
         /**
          * Assumed 1-sigma error on the integrator's own speed, m/s, used as the other half of the
@@ -169,15 +169,17 @@ class IMUModelRunner(context: Context) {
      */
     private fun assetFilePath(context: Context, assetName: String): String {
         val file = File(context.filesDir, assetName)
-        // openFd only works on stored (uncompressed) assets — see noCompress in build.gradle.kts.
-        // If that ever regresses, fall back to copying every time rather than failing to load.
+        val appUpdateTime = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        } catch (_: Exception) { 0L }
+
         val assetLength = try {
             context.assets.openFd(assetName).use { it.length }
         } catch (e: Exception) {
             Log.w(TAG, "$assetName is compressed in the APK; cannot size-check, recopying", e)
             -1L
         }
-        if (assetLength > 0 && file.exists() && file.length() == assetLength) {
+        if (assetLength > 0 && file.exists() && file.length() == assetLength && file.lastModified() >= appUpdateTime) {
             return file.absolutePath
         }
 
@@ -189,8 +191,7 @@ class IMUModelRunner(context: Context) {
                 out.fd.sync()
             }
         }
-        // Rename only once the bytes are down, so a kill mid-copy cannot leave a truncated model
-        // that the size check would later accept.
+        if (file.exists()) file.delete()
         if (!tmp.renameTo(file)) {
             tmp.delete()
             throw IllegalStateException("Could not move $assetName into place")
