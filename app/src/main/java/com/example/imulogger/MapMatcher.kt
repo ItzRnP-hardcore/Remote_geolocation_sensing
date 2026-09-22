@@ -195,6 +195,13 @@ class MapMatcher(private val roads: RoadNetwork) {
                 // Staying on the same road is the common case; a small bonus stops the matcher
                 // flickering between parallel candidates at a junction.
                 if (h.segment === c.segment) t += 0.5
+                // Kinematic turn penalty: sharp turn transitions between crossing roads at high speeds are physically improbable
+                if (h.segment !== c.segment && speedMps > 6.0) {
+                    val turnAngle = undirectedBearingDelta(h.segment.bearingDeg, c.segment.bearingDeg)
+                    if (turnAngle > 50.0) {
+                        t -= ((turnAngle - 50.0) / 25.0) * (speedMps / 6.0)
+                    }
+                }
                 h.logProb + t
             }
             next.add(Hypothesis(c.lat, c.lon, c.segment, score + best))

@@ -484,12 +484,14 @@ class SensorService : Service() {
      * that way. The rest of this is ready for a checkpoint worth trusting.
      */
     private fun fuseModelSpeed(mu: Float, logvar: Float, stationaryLogit: Float) {
+        val isStationary = stationaryLogit >= IMUModelRunner.STATIONARY_LOGIT_THRESHOLD
+        deadReckoner.onStationarySignal(isStationary)
         if (!IMUModelRunner.speedFusionEnabled) return
         if (!unaidedNow()) return
         // A confident stand-still call is an observation that speed is zero, not a reason to skip:
         // it is the one prediction the model can make that the integrator cannot check for itself.
         val target =
-            if (stationaryLogit >= IMUModelRunner.STATIONARY_LOGIT_THRESHOLD) 0.0
+            if (isStationary) 0.0
             else mu.toDouble()
         deadReckoner.applyModelSpeed(target, IMUModelRunner.fusionWeight(logvar))
     }
@@ -1389,6 +1391,7 @@ class SensorService : Service() {
                 location.longitude,
                 if (location.hasSpeed()) location.speed else null,
                 if (location.hasBearing()) location.bearing else null,
+                if (location.hasAccuracy()) location.accuracy else null,
             )
         } else if (!deadReckoner.initialised) {
             // Free-run cannot start from nothing; the first fix always seeds the origin.

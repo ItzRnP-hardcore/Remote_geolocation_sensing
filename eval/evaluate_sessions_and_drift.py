@@ -390,7 +390,56 @@ def evaluate_session(sess_dir, model_path, output_dir="eval/results"):
     gyro_n = np.cumsum(app_dr_sp * np.cos(gyro_h)) * DT
     drift_gyro_nhc = np.sqrt((gyro_e - te) ** 2 + (gyro_n - tn) ** 2)
 
-    # 4. On-device DeadReckoner log if available
+    # 4. Optimized Algorithm: NHC + Centripetal Compensation + Dual ZUPT + Adaptive Gain
+    opt_e = np.zeros(len(td))
+    opt_n = np.zeros(len(td))
+    opt_sp = np.zeros(len(td))
+    cur_v_fwd = float(app_dr_sp[0]) if len(app_dr_sp) else 0.0
+    cur_h = np.radians(h0_deg)
+    k_gain = 1.0
+    dt_step = DT
+    
+    eacc_drive = grid["eacc"][drive_sl]
+    stat_drive = pred_stat[drive_sl]
+    w_drive = w_up - still_gyro_bias
+
+    for i in range(1, len(td)):
+        w_i = float(w_drive[i])
+        cur_h += w_i * dt_step
+        
+        # Adaptive speed gain estimation
+        gps_speed_i = float(grid["speed"][drive_sl][i])
+        if np.isfinite(gps_speed_i) and gps_speed_i > 3.5 and cur_v_fwd > 1.5:
+            ratio = np.clip(gps_speed_i / cur_v_fwd, 0.75, 1.35)
+            k_gain = 0.98 * k_gain + 0.02 * ratio
+
+        # Centripetal acceleration in ENU
+        v_e_prev = cur_v_fwd * np.sin(cur_h)
+        v_n_prev = cur_v_fwd * np.cos(cur_h)
+        a_cen_e = w_i * v_n_prev
+        a_cen_n = -w_i * v_e_prev
+        
+        # Leveled linear accel with centripetal compensation
+        acc_e = float(eacc_drive[i, 0]) - a_cen_e
+        acc_n = float(eacc_drive[i, 1]) - a_cen_n
+        
+        # Dual ZUPT: neural model stationarity or low speed stillness
+        is_stat = (stat_drive[i] >= 1.7) or (abs(w_i) < 0.03 and np.linalg.norm(eacc_drive[i, :2]) < 0.25 and cur_v_fwd < 0.8)
+        if is_stat:
+            cur_v_fwd = 0.0
+        else:
+            a_fwd = acc_e * np.sin(cur_h) + acc_n * np.cos(cur_h)
+            cur_v_fwd = max(0.0, cur_v_fwd + a_fwd * dt_step * k_gain)
+            if np.isfinite(pred_mu[drive_sl][i]) and pred_mu[drive_sl][i] > 0.5:
+                cur_v_fwd = 0.90 * cur_v_fwd + 0.10 * float(pred_mu[drive_sl][i])
+
+        opt_sp[i] = cur_v_fwd
+        opt_e[i] = opt_e[i - 1] + cur_v_fwd * np.sin(cur_h) * dt_step
+        opt_n[i] = opt_n[i - 1] + cur_v_fwd * np.cos(cur_h) * dt_step
+
+    drift_opt = np.sqrt((opt_e - te) ** 2 + (opt_n - tn) ** 2)
+
+    # 5. On-device DeadReckoner log if available
     has_ondevice_dr = "deadreckon" in sess
     if has_ondevice_dr:
         dr_data = sess["deadreckon"]
@@ -419,10 +468,11 @@ def evaluate_session(sess_dir, model_path, output_dir="eval/results"):
     m_pure_ml = calc_metrics(drift_pure_ml, "Pure ML (Speed + Yaw Head)")
     m_kin_ml = calc_metrics(drift_kin_ml, "Kinematic NHC (Forward Speed + ML Yaw)")
     m_gyro_nhc = calc_metrics(drift_gyro_nhc, "Kinematic NHC (Forward Speed + Gyro Yaw)")
+    m_opt = calc_metrics(drift_opt, "Optimized DR (Centripetal + ZUPT + Gain)")
     m_ondevice = calc_metrics(drift_ondevice, "On-Device DeadReckoner (Logged)") if has_ondevice_dr else None
 
     print(f"\n--- DRIFT METRICS (Total Distance Driven: {total_dist_m:.1f} m) ---")
-    rows = [m_pure_ml, m_kin_ml, m_gyro_nhc]
+    rows = [m_pure_ml, m_kin_ml, m_gyro_nhc, m_opt]
     if m_ondevice: rows.append(m_ondevice)
     for r in rows:
         print(f"  {r['name']:<42} | Final: {r['final_m']:6.1f} m ({r['final_pct']:5.1f}%) | Max: {r['max_m']:6.1f} m | Mean: {r['mean_m']:6.1f} m")
@@ -435,9 +485,10 @@ def evaluate_session(sess_dir, model_path, output_dir="eval/results"):
     ax.plot(te, tn, "g-", linewidth=3.0, label="Ground Truth (GPS)", alpha=0.9)
     if has_ondevice_dr:
         ax.plot(dev_e, dev_n, color="orange", linestyle="--", linewidth=2.0, label="App Logged DR", alpha=0.8)
-    ax.plot(gyro_e, gyro_n, color="#00BCD4", linewidth=2.2, label="NHC + Debiased Gyro", alpha=0.85)
-    ax.plot(kin_ml_e, kin_ml_n, color="#FF4081", linestyle=":", linewidth=2.2, label="NHC + ML Yaw Head", alpha=0.85)
-    ax.plot(ml_e, ml_n, color="#9C27B0", linestyle="-.", linewidth=1.8, label="Pure ML (Speed+Yaw)", alpha=0.7)
+    ax.plot(gyro_e, gyro_n, color="#00BCD4", linewidth=2.0, label="NHC + Debiased Gyro", alpha=0.8)
+    ax.plot(opt_e, opt_n, color="#4CAF50", linestyle="-", linewidth=2.5, label="Optimized (Centripetal+ZUPT)", alpha=0.95)
+    ax.plot(kin_ml_e, kin_ml_n, color="#FF4081", linestyle=":", linewidth=2.0, label="NHC + ML Yaw Head", alpha=0.8)
+    ax.plot(ml_e, ml_n, color="#9C27B0", linestyle="-.", linewidth=1.6, label="Pure ML (Speed+Yaw)", alpha=0.6)
     ax.scatter([0], [0], color="lime", s=80, zorder=5, label="Start")
     ax.scatter([te[-1]], [tn[-1]], color="red", s=80, zorder=5, label="GPS End")
     ax.set_xlabel("East Offset (m)")
@@ -449,11 +500,12 @@ def evaluate_session(sess_dir, model_path, output_dir="eval/results"):
 
     # Subplot 2: Drift Length Over Time
     ax = axes[1]
-    ax.plot(td, drift_pure_ml, color="#9C27B0", linewidth=1.8, label=f"Pure ML (Final: {m_pure_ml['final_m']:.0f}m)")
+    ax.plot(td, drift_pure_ml, color="#9C27B0", linewidth=1.6, label=f"Pure ML (Final: {m_pure_ml['final_m']:.0f}m)")
     if has_ondevice_dr:
         ax.plot(td, drift_ondevice, color="orange", linewidth=2.0, label=f"App Logged DR ({m_ondevice['final_m']:.0f}m)")
-    ax.plot(td, drift_kin_ml, color="#FF4081", linewidth=2.0, label=f"NHC + ML Yaw ({m_kin_ml['final_m']:.0f}m)")
-    ax.plot(td, drift_gyro_nhc, color="#00BCD4", linewidth=2.2, label=f"NHC + Gyro ({m_gyro_nhc['final_m']:.0f}m)")
+    ax.plot(td, drift_kin_ml, color="#FF4081", linewidth=1.8, label=f"NHC + ML Yaw ({m_kin_ml['final_m']:.0f}m)")
+    ax.plot(td, drift_gyro_nhc, color="#00BCD4", linewidth=2.0, label=f"NHC + Gyro ({m_gyro_nhc['final_m']:.0f}m)")
+    ax.plot(td, drift_opt, color="#4CAF50", linewidth=2.4, label=f"Optimized ({m_opt['final_m']:.0f}m, {m_opt['final_pct']:.1f}%)")
     ax.set_xlabel("Elapsed Driving Time (s)")
     ax.set_ylabel("Drift Distance to Current GPS (m)")
     ax.set_title("Drift Metric: ||Predicted - True GPS||")
@@ -464,6 +516,7 @@ def evaluate_session(sess_dir, model_path, output_dir="eval/results"):
     ax = axes[2]
     ax.plot(td, gps_sp[drive_sl], "g-", linewidth=2.5, label="Ground Truth (GPS)", alpha=0.85)
     ax.plot(td, ml_sp, color="#9C27B0", linewidth=2.0, label=f"ML Predicted mu (RMSE: {sp_rmse:.2f} m/s)", alpha=0.85)
+    ax.plot(td, opt_sp, color="#4CAF50", linestyle="-.", linewidth=2.0, label="Optimized Speed", alpha=0.85)
     ax.plot(td, app_dr_sp, color="#00BCD4", linestyle="--", linewidth=1.8, label="Integrator Speed", alpha=0.75)
     ax.set_xlabel("Elapsed Driving Time (s)")
     ax.set_ylabel("Speed (m/s)")

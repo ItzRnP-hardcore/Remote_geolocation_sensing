@@ -83,6 +83,9 @@ class DeadReckoner {
          * integrator believes it is stopped is a disagreement only GNSS can settle.
          */
         const val MIN_SPEED_FOR_MODEL_FIX = 0.3
+
+        /** Rate at which the speed gain tracks the GNSS/dead-reckoning velocity ratio. */
+        const val K_SPEED_GAIN = 0.02
     }
 
     /** Position in the local tangent plane, metres east/north of the origin. */
@@ -110,6 +113,24 @@ class DeadReckoner {
 
     /** Forward speed along the vehicle heading, m/s. */
     var forwardSpeed: Double = 0.0
+        private set
+
+    /** Most recent yaw rate in rad/s, positive clockwise. Used for centripetal force compensation. */
+    private var lastYawRateRadS = 0.0
+
+    /** Whether the neural model's stationarity head asserts stand-still. */
+    var isStationaryModel: Boolean = false
+        private set
+
+    /**
+     * Learned forward speed calibration gain.
+     *
+     * In vehicles, the ratio between accelerometer-integrated speed and true GNSS speed
+     * varies between 0.85 and 1.25 depending on tire stiffness, suspension damping, and phone
+     * mount compliance. During GNSS-aiding epochs with healthy geometry and significant speed,
+     * this factor is learned online and applied to dead reckoning during outages.
+     */
+    var speedGain: Double = 1.0
         private set
 
     /** World-frame accelerometer bias, learned during stand-still. */
@@ -257,11 +278,24 @@ class DeadReckoner {
      */
     fun onYawRate(yawRateRadS: Double, dt: Double) {
         if (dt <= 0.0 || dt > 1.0) return
+        lastYawRateRadS = yawRateRadS
         headingRad = (headingRad + yawRateRadS * dt) % (2.0 * Math.PI)
         if (headingRad < 0.0) headingRad += 2.0 * Math.PI
         if (isPhoneFixed && forwardSpeed > 0.0) {
             vE = forwardSpeed * kotlin.math.sin(headingRad)
             vN = forwardSpeed * kotlin.math.cos(headingRad)
+        }
+    }
+
+    /**
+     * Feed an external stationary call (e.g. from the neural network's stationarity head).
+     */
+    fun onStationarySignal(byModel: Boolean) {
+        isStationaryModel = byModel
+        if (byModel) {
+            isStationary = true
+            vE = 0.0; vN = 0.0; vU = 0.0
+            forwardSpeed = 0.0
         }
     }
 
@@ -299,7 +333,7 @@ class DeadReckoner {
 
     fun onGyro(x: Float, y: Float, z: Float) {
         lastGyroNorm = sqrt((x * x + y * y + z * z).toDouble())
-        if (isStationary) {
+        if (isStationary || isStationaryModel) {
             // Standing still means the true rate is zero, so whatever the gyro reports is offset.
             // [isStationary] is maintained on the accelerometer tick; both streams arrive at
             // 200 Hz, so it is at most one sample stale here, which cannot matter for a term
@@ -354,14 +388,23 @@ class DeadReckoner {
         val norm = sqrt((x * x + y * y + z * z).toDouble())
 
         // Stand-still detection drives both the gravity estimate and the zero-velocity update.
+        // Combines low-frequency sensor stillness with the neural model's stationarity head.
         val looksStill =
-            abs(norm - gravity) < STILL_ACCEL_TOL && lastGyroNorm < STILL_GYRO_TOL
+            (abs(norm - gravity) < STILL_ACCEL_TOL && lastGyroNorm < STILL_GYRO_TOL) || isStationaryModel
         stillFor = if (looksStill) stillFor + dt else 0.0
-        isStationary = stillFor > STILL_HOLD_S
+        isStationary = (stillFor > STILL_HOLD_S) || isStationaryModel
 
-        // Linear acceleration: strip gravity from the up axis, then the learned bias.
-        var lE = aE - bE
-        var lN = aN - bN
+        // Dynamic centripetal acceleration compensation in ENU frame:
+        // When turning at yaw rate omega with forward velocity (vE, vN), the vehicle experiences
+        // centripetal acceleration a_cen = omega x v = [ omega_yaw * vN, -omega_yaw * vE, 0 ].
+        // Subtracting this prevents the lateral force from corrupting the forward axis if the
+        // phone mount is pitched or rolled relative to the vehicle chassis.
+        val aCenE = if (isPhoneFixed && forwardSpeed > 0.5) lastYawRateRadS * vN else 0.0
+        val aCenN = if (isPhoneFixed && forwardSpeed > 0.5) -lastYawRateRadS * vE else 0.0
+
+        // Linear acceleration: strip gravity from the up axis, centripetal from horizontal, then learned bias.
+        var lE = aE - bE - aCenE
+        var lN = aN - bN - aCenN
         var lU = aU - gravity - bU
 
         if (isStationary) {
@@ -377,12 +420,12 @@ class DeadReckoner {
         } else if (isPhoneFixed) {
             // Non-Holonomic Constraint (NHC) for vehicle:
             // A vehicle cannot translate sideways (v_lateral = 0).
-            // Forward acceleration is projected along heading:
+            // Forward acceleration is projected along heading and scaled by adaptive speed gain:
             val sinH = kotlin.math.sin(headingRad)
             val cosH = kotlin.math.cos(headingRad)
             val aFwd = lE * sinH + lN * cosH
 
-            forwardSpeed = (forwardSpeed + aFwd * dt).coerceAtLeast(0.0)
+            forwardSpeed = (forwardSpeed + aFwd * dt * speedGain).coerceAtLeast(0.0)
             vE = forwardSpeed * sinH
             vN = forwardSpeed * cosH
             vU = 0.0
@@ -406,7 +449,7 @@ class DeadReckoner {
      * constellation is healthy; during an outage the integrator is left alone so the divergence
      * is real rather than continuously papered over.
      */
-    fun anchorTo(lat: Double, lon: Double, speedMps: Float?, bearingDeg: Float?) {
+    fun anchorTo(lat: Double, lon: Double, speedMps: Float?, bearingDeg: Float?, accuracyM: Float? = null) {
         if (!initialised) setOrigin(lat, lon)
 
         pE = (lon - originLon) * mPerDegLon
@@ -419,11 +462,17 @@ class DeadReckoner {
         // GNSS velocity is far better than anything the accelerometer can integrate, so take it
         // whenever it is offered rather than blending.
         if (speedMps != null && bearingDeg != null) {
-            forwardSpeed = speedMps.toDouble()
+            val gpsSpeed = speedMps.toDouble()
+            // Online self-supervised adaptation: learn mounting vibration scale factor
+            if (gpsSpeed > 3.5 && forwardSpeed > 1.5 && (accuracyM == null || accuracyM < 4.5f)) {
+                val ratio = (gpsSpeed / forwardSpeed).coerceIn(0.75, 1.35)
+                speedGain = (1.0 - K_SPEED_GAIN) * speedGain + K_SPEED_GAIN * ratio
+            }
+            forwardSpeed = gpsSpeed
             headingRad = Math.toRadians(bearingDeg.toDouble())
             val rad = headingRad
-            vE = speedMps * kotlin.math.sin(rad)
-            vN = speedMps * kotlin.math.cos(rad)
+            vE = gpsSpeed * kotlin.math.sin(rad)
+            vN = gpsSpeed * kotlin.math.cos(rad)
         }
         vU = 0.0
     }
@@ -480,5 +529,8 @@ class DeadReckoner {
         modelSpeedCorrectionMps = 0.0
         headingRad = 0.0
         forwardSpeed = 0.0
+        lastYawRateRadS = 0.0
+        isStationaryModel = false
+        speedGain = 1.0
     }
 }

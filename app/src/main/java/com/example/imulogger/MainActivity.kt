@@ -470,6 +470,28 @@ class MainActivity : AppCompatActivity() {
             title = getString(R.string.destination)
         }
 
+        trackLine = Polyline(this).apply {
+            outlinePaint.color = ContextCompat.getColor(context, R.color.track)
+            outlinePaint.strokeWidth = 8f
+        }
+        drLine = Polyline(this).apply {
+            outlinePaint.color = ContextCompat.getColor(context, R.color.track_imu)
+            outlinePaint.strokeWidth = 7f
+            outlinePaint.pathEffect = DashPathEffect(floatArrayOf(18f, 12f), 0f)
+        }
+        snapLine = Polyline(this).apply {
+            outlinePaint.color = ContextCompat.getColor(context, R.color.track_snap)
+            outlinePaint.strokeWidth = 7f
+        }
+        marker = Marker(this).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            icon = ContextCompat.getDrawable(context, R.drawable.ic_position)
+        }
+        drMarker = Marker(this).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            icon = ContextCompat.getDrawable(context, R.drawable.ic_position_imu)
+        }
+
         val mapEventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
             override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
                 if (binding.rvSearchSuggestions.visibility == View.VISIBLE) {
