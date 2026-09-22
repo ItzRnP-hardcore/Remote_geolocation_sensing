@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     /** Overlays repainting the degraded stretches of each track; rebuilt whenever it grows. */
     private val gpsQualityLines = mutableListOf<Polyline>()
     private val drQualityLines = mutableListOf<Polyline>()
+    private val snapSegments = mutableListOf<Polyline>()
 
     private var panelExpanded = false
     private var offline = true
@@ -243,11 +244,15 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnTheme.setOnClickListener {
             hapticClick()
-            MapsforgeSource.setNight(this, !MapsforgeSource.isNight(this))
+            val newNight = !MapsforgeSource.isNight(this)
+            MapsforgeSource.setNight(this, newNight)
             reattachMap()
+            applyMapThemeFilter()
+            binding.map.tileProvider?.clearTileCache()
+            binding.map.invalidate()
             Toast.makeText(
                 this,
-                if (MapsforgeSource.isNight(this)) "Night map" else "Day map",
+                if (newNight) "Night map" else "Day map",
                 Toast.LENGTH_SHORT,
             ).show()
         }
@@ -435,28 +440,8 @@ class MainActivity : AppCompatActivity() {
         }
         overlays.add(locationOverlay)
 
-        // Dark mode mapping with enhanced road visibility
-        val isDark = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
-        if (isDark) {
-            val nightMatrix = android.graphics.ColorMatrix(
-                floatArrayOf(
-                    -1f, 0f, 0f, 0f, 255f,
-                    0f, -1f, 0f, 0f, 255f,
-                    0f, 0f, -1f, 0f, 255f,
-                    0f, 0f, 0f, 1f, 0f
-                )
-            )
-            val contrastMatrix = android.graphics.ColorMatrix(
-                floatArrayOf(
-                    1.4f, 0f, 0f, 0f, 20f,
-                    0f, 1.4f, 0f, 0f, 30f,
-                    0f, 0f, 1.6f, 0f, 50f,
-                    0f, 0f, 0f, 1f, 0f
-                )
-            )
-            nightMatrix.postConcat(contrastMatrix)
-            overlayManager.tilesOverlay.setColorFilter(android.graphics.ColorMatrixColorFilter(nightMatrix))
-        }
+        // Apply day/night theme filter on map tiles
+        applyMapThemeFilter()
 
         // Navigation route polyline
         routeLine = Polyline(this).apply {
@@ -642,21 +627,71 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Repaint the stretches where GNSS was degraded or withheld, on top of the base track.
+     * Splits into separate road polylines whenever consecutive points have a gap > 35m
+     * to prevent unnatural straight lines cutting across grass or disconnected roads.
      */
+    private fun renderSnapTrack(points: List<TrackPoint>) {
+        val overlays = binding.map.overlays
+        snapSegments.forEach { overlays.remove(it) }
+        snapSegments.clear()
+        snapLine.setPoints(emptyList())
+
+        if (points.isEmpty()) {
+            binding.map.invalidate()
+            return
+        }
+
+        val baseAt = overlays.indexOf(snapLine).takeIf { it >= 0 } ?: (overlays.indexOf(routeLine) + 1).coerceIn(0, overlays.size)
+
+        val segments = mutableListOf<MutableList<GeoPoint>>()
+        var currentSegment = mutableListOf<GeoPoint>()
+        var lastPt: TrackPoint? = null
+
+        for (pt in points) {
+            val last = lastPt
+            if (last != null) {
+                val mLon = 111132.0 * kotlin.math.cos(Math.toRadians((last.lat + pt.lat) / 2))
+                val dx = (pt.lon - last.lon) * mLon
+                val dy = (pt.lat - last.lat) * 111132.0
+                val distM = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (distM > 35.0) {
+                    if (currentSegment.isNotEmpty()) {
+                        segments.add(currentSegment)
+                        currentSegment = mutableListOf()
+                    }
+                }
+            }
+            currentSegment.add(GeoPoint(pt.lat, pt.lon))
+            lastPt = pt
+        }
+        if (currentSegment.isNotEmpty()) {
+            segments.add(currentSegment)
+        }
+
+        for (seg in segments) {
+            val pts = if (seg.size == 1) listOf(seg[0], seg[0]) else seg
+            val poly = Polyline(binding.map).apply {
+                setPoints(pts)
+                outlinePaint.color = ContextCompat.getColor(this@MainActivity, R.color.track_snap)
+                outlinePaint.strokeWidth = 7f
+                outlinePaint.strokeCap = Paint.Cap.ROUND
+                outlinePaint.strokeJoin = Paint.Join.ROUND
+                isEnabled = showSnapTrack
+            }
+            snapSegments.add(poly)
+        }
+
+        snapSegments.forEachIndexed { idx, poly ->
+            overlays.add((baseAt + idx).coerceAtMost(overlays.size), poly)
+        }
+        binding.map.invalidate()
+    }
+
     private fun drawSnapTrack(points: List<TrackPoint>) {
         if (isViewingHistory) return
         if (points.size == snapSize) return
-        val oldSize = snapSize
         snapSize = points.size
-        if (oldSize == 0 || snapLine.actualPoints.isEmpty()) {
-            snapLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
-        } else {
-            for (i in oldSize until points.size) {
-                val pt = points[i]
-                snapLine.addPoint(GeoPoint(pt.lat, pt.lon))
-            }
-        }
-        binding.map.invalidate()
+        renderSnapTrack(points)
     }
 
     private fun rebuildQualitySegments(
@@ -828,11 +863,41 @@ class MainActivity : AppCompatActivity() {
     /** Rebuild the tile provider after the theme or the set of installed maps changed. */
     private fun reattachMap() {
         val bounds = OfflineMaps.apply(binding.map, offline)
+        applyMapThemeFilter()
+        binding.map.tileProvider?.clearTileCache()
         binding.map.invalidate()
         renderTileState()
         // Only reframe when there is nowhere better to look; otherwise keep the user's view.
         if (SensorService.status.value.lastLat == null && trackSize == 0) {
             bounds?.let { binding.map.post { binding.map.zoomToBoundingBox(it, false) } }
+        }
+    }
+
+    /** Apply color invert/contrast filter for dark mode or clear it for day mode. */
+    private fun applyMapThemeFilter() {
+        val isNight = MapsforgeSource.isNight(this)
+        val tilesOverlay = binding.map.overlayManager.tilesOverlay ?: return
+        if (isNight) {
+            val nightMatrix = android.graphics.ColorMatrix(
+                floatArrayOf(
+                    -1f, 0f, 0f, 0f, 255f,
+                    0f, -1f, 0f, 0f, 255f,
+                    0f, 0f, -1f, 0f, 255f,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+            val contrastMatrix = android.graphics.ColorMatrix(
+                floatArrayOf(
+                    1.4f, 0f, 0f, 0f, 20f,
+                    0f, 1.4f, 0f, 0f, 30f,
+                    0f, 0f, 1.6f, 0f, 50f,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+            nightMatrix.postConcat(contrastMatrix)
+            tilesOverlay.setColorFilter(android.graphics.ColorMatrixColorFilter(nightMatrix))
+        } else {
+            tilesOverlay.setColorFilter(null)
         }
     }
 
@@ -1352,6 +1417,7 @@ class MainActivity : AppCompatActivity() {
             showSnapTrack = !showSnapTrack
             updateLayerToggleUI()
             snapLine.isEnabled = showSnapTrack
+            snapSegments.forEach { it.isEnabled = showSnapTrack }
             binding.map.invalidate()
         }
     }
@@ -1507,7 +1573,7 @@ class MainActivity : AppCompatActivity() {
             // Draw loaded tracks
             trackLine.setPoints(loaded.gpsTrack.map { GeoPoint(it.lat, it.lon) })
             drLine.setPoints(loaded.drTrack.map { GeoPoint(it.lat, it.lon) })
-            snapLine.setPoints(loaded.snapTrack.map { GeoPoint(it.lat, it.lon) })
+            renderSnapTrack(loaded.snapTrack)
             rebuildQualitySegments(loaded.gpsTrack, trackLine, gpsQualityLines, 11f)
 
             // Reset map orientation to 0 (North-Up) so historical track is framed upright
@@ -1558,7 +1624,7 @@ class MainActivity : AppCompatActivity() {
                         hapticClick()
                         drLine.setPoints(result.recomputedTrack.map { GeoPoint(it.lat, it.lon) })
                         if (result.mapMatchedTrack.isNotEmpty()) {
-                            snapLine.setPoints(result.mapMatchedTrack.map { GeoPoint(it.lat, it.lon) })
+                            renderSnapTrack(result.mapMatchedTrack)
                         }
                         binding.map.invalidate()
 

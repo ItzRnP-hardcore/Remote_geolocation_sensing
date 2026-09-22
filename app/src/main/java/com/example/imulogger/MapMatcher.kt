@@ -31,7 +31,7 @@ class MapMatcher(private val roads: RoadNetwork) {
     companion object {
         /** How far from a fix to look for road candidates. Widened as the estimate drifts. */
         private const val BASE_SEARCH_RADIUS_M = 60.0
-        private const val MAX_SEARCH_RADIUS_M = 400.0
+        private const val MAX_SEARCH_RADIUS_M = 100.0
 
         /**
          * Emission spread, metres. Newson & Krumm fit ~4.07 m for GPS; this is far larger because
@@ -144,10 +144,11 @@ class MapMatcher(private val roads: RoadNetwork) {
         courseDeg: Double?,
         speedMps: Double,
         uncertaintyM: Double,
+        forceSnap: Boolean = false,
     ): Match? {
         // Snapping a fix that is already better than the map makes it worse. Declining is the
         // correct answer, not a missed opportunity - see MIN_UNCERTAINTY_TO_SNAP_M.
-        if (uncertaintyM < MIN_UNCERTAINTY_TO_SNAP_M) {
+        if (!forceSnap && uncertaintyM < MIN_UNCERTAINTY_TO_SNAP_M) {
             // The chain is still advanced so hypotheses stay warm for when aiding is lost.
             lastLat = lat
             lastLon = lon
@@ -194,7 +195,11 @@ class MapMatcher(private val roads: RoadNetwork) {
                 var t = -0.5 * (mismatch / TRANSITION_SIGMA_M).let { it * it }
                 // Staying on the same road is the common case; a small bonus stops the matcher
                 // flickering between parallel candidates at a junction.
-                if (h.segment === c.segment) t += 0.5
+                if (h.segment === c.segment) {
+                    t += 1.0
+                } else if (hop > 25.0) {
+                    t -= 12.0 // soft penalty for jumping across to another road when far away
+                }
                 // Kinematic turn penalty: sharp turn transitions between crossing roads at high speeds are physically improbable
                 if (h.segment !== c.segment && speedMps > 6.0) {
                     val turnAngle = undirectedBearingDelta(h.segment.bearingDeg, c.segment.bearingDeg)
@@ -244,7 +249,7 @@ class MapMatcher(private val roads: RoadNetwork) {
         // same as being wrong yet, so the gate is the uncertainty itself rather than GNSS state.
         // The floor keeps a small correction available when drift is still near zero, since road
         // centrelines and the true driving line differ by a lane's width regardless.
-        val budget = max(uncertaintyM, MIN_CORRECTION_BUDGET_M)
+        val budget = max(uncertaintyM, MIN_CORRECTION_BUDGET_M).coerceAtMost(60.0)
         if (correction > budget) return null
 
         return Match(

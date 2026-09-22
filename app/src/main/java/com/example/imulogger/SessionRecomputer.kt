@@ -131,7 +131,12 @@ object SessionRecomputer {
 
         dr.position?.let {
             recomputedTrack.add(it)
-            mapMatchedTrack.add(it)
+            val startMatch = mapMatcher?.update(it.lat, it.lon, startBearing.toDouble(), startSpeed.toDouble(), 0.0, forceSnap = true)
+            if (startMatch != null) {
+                mapMatchedTrack.add(TrackPoint(startMatch.lat, startMatch.lon))
+            } else {
+                mapMatchedTrack.add(it)
+            }
         }
 
         val rot = FloatArray(9)
@@ -236,15 +241,13 @@ object SessionRecomputer {
                                         val course = dr.courseDeg
                                         val speed = dr.speed
                                         val uncertainty = dr.positionSigmaM
-                                        val m = mapMatcher?.update(p.lat, p.lon, course, speed, uncertainty)
+                                        val m = mapMatcher?.update(p.lat, p.lon, course, speed, uncertainty, forceSnap = true)
                                         if (m != null) {
                                             mapMatchedTrack.add(TrackPoint(m.lat, m.lon))
                                             // Close the loop: feed road bearing back to DeadReckoner heading
-                                            if (m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE) {
+                                            if (m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE && m.correctionM <= 25.0) {
                                                 dr.applyHeadingCorrection(m.roadBearingDeg, MapMatcher.HEADING_FEEDBACK_GAIN)
                                             }
-                                        } else {
-                                            mapMatchedTrack.add(p)
                                         }
                                     }
                                 }
@@ -259,7 +262,6 @@ object SessionRecomputer {
 
         dr.position?.let {
             recomputedTrack.add(it)
-            mapMatchedTrack.add(it)
         }
         onProgress(100)
 
@@ -267,8 +269,10 @@ object SessionRecomputer {
         val finalDr = recomputedTrack.last()
         val newDriftM = haversine(finalDr.lat, finalDr.lon, lastGps.lat, lastGps.lon)
 
-        val finalMm = mapMatchedTrack.last()
-        val mapMatchedDriftM = haversine(finalMm.lat, finalMm.lon, lastGps.lat, lastGps.lon)
+        val finalMm = mapMatchedTrack.lastOrNull() ?: finalDr
+        val mapMatchedDriftM = if (mapMatchedTrack.isNotEmpty()) {
+            haversine(finalMm.lat, finalMm.lon, lastGps.lat, lastGps.lon)
+        } else Double.NaN
 
         var totalDistM = 0.0
         for (i in 0 until gpsPoints.size - 1) {
