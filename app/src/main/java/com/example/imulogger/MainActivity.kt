@@ -1589,16 +1589,20 @@ class MainActivity : AppCompatActivity() {
                     if (result != null) {
                         hapticClick()
                         drLine.setPoints(result.recomputedTrack.map { GeoPoint(it.lat, it.lon) })
+                        if (result.mapMatchedTrack.isNotEmpty()) {
+                            snapLine.setPoints(result.mapMatchedTrack.map { GeoPoint(it.lat, it.lon) })
+                        }
                         binding.map.invalidate()
 
                         val origStr = if (result.originalDriftM > 0) String.format(Locale.US, "%.0fm", result.originalDriftM) else "N/A"
-                        val newStr = String.format(Locale.US, "%.0fm", result.newDriftM)
+                        val drStr = String.format(Locale.US, "%.0fm", result.newDriftM)
+                        val mmStr = if (!result.mapMatchedDriftM.isNaN()) String.format(Locale.US, "%.1fm", result.mapMatchedDriftM) else "N/A"
                         val pctStr = String.format(Locale.US, "%.0f%%", result.improvementPct)
 
-                        binding.tvHistoryStats.text = "New Drift: $newStr (was $origStr, -$pctStr)"
+                        binding.tvHistoryStats.text = "Drift: DR $drStr, Road $mmStr (was $origStr, -$pctStr)"
                         Toast.makeText(
                             this@MainActivity,
-                            "Track recomputed! Drift reduced to $newStr (-$pctStr)",
+                            "Track recomputed! DR: $drStr, Road: $mmStr (-$pctStr)",
                             Toast.LENGTH_LONG
                         ).show()
                     } else {
