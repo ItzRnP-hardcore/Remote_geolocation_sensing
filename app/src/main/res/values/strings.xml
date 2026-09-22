@@ -93,4 +93,10 @@
     <string name="calibration_skip">Skip — steer on the gyro only</string>
     <string name="mount_next_title">Next: the phone learns how it sits in the car</string>
     <string name="mount_next_hint">On the stand the phone rarely points exactly where the car points. Drive normally — on the first straight stretch with GPS, the app measures that angle by itself. Until then, tunnel heading falls back to the gyro.</string>
+    
+    <!-- Recompute Track Strings -->
+    <string name="recompute_track">Recompute</string>
+    <string name="recomputing_track">Recomputing with new model…</string>
+    <string name="recompute_success">Drift: %1$.0fm (was %2$.0fm, %3$+.0f%%)</string>
+    <string name="recompute_no_imu">No raw IMU file found for this session</string>
 </resources>

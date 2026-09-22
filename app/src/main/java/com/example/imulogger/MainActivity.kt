@@ -28,6 +28,7 @@ import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
 import android.graphics.DashPathEffect
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.io.File
 
 import android.annotation.SuppressLint
 import android.location.Location
@@ -1560,6 +1561,51 @@ class MainActivity : AppCompatActivity() {
             val durStr = String.format(Locale.US, "%d:%02d", durSec / 60, durSec % 60)
             binding.tvHistoryStats.text = "$durStr · ${compact(summary.imuSamples)} IMU · ${summary.gpsFixes} GPS fixes"
             binding.historyBanner.visibility = View.VISIBLE
+            binding.historyRecomputeProgress.visibility = View.GONE
+            binding.btnRecompute.isEnabled = true
+            binding.btnRecompute.visibility = if (File(summary.dir, "imu.csv").exists()) View.VISIBLE else View.GONE
+
+            binding.btnRecompute.setOnClickListener {
+                hapticClick()
+                binding.btnRecompute.isEnabled = false
+                binding.historyRecomputeProgress.visibility = View.VISIBLE
+                binding.historyRecomputeProgress.progress = 0
+                binding.tvHistoryStats.text = getString(R.string.recomputing_track)
+
+                lifecycleScope.launch {
+                    val result = SessionRecomputer.recomputeSession(
+                        context = this@MainActivity,
+                        sessionDir = summary.dir,
+                        onProgress = { pct ->
+                            runOnUiThread {
+                                binding.historyRecomputeProgress.progress = pct
+                            }
+                        }
+                    )
+
+                    binding.historyRecomputeProgress.visibility = View.GONE
+                    binding.btnRecompute.isEnabled = true
+
+                    if (result != null) {
+                        hapticClick()
+                        drLine.setPoints(result.recomputedTrack.map { GeoPoint(it.lat, it.lon) })
+                        binding.map.invalidate()
+
+                        val origStr = if (result.originalDriftM > 0) String.format(Locale.US, "%.0fm", result.originalDriftM) else "N/A"
+                        val newStr = String.format(Locale.US, "%.0fm", result.newDriftM)
+                        val pctStr = String.format(Locale.US, "%.0f%%", result.improvementPct)
+
+                        binding.tvHistoryStats.text = "New Drift: $newStr (was $origStr, -$pctStr)"
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Track recomputed! Drift reduced to $newStr (-$pctStr)",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, getString(R.string.recompute_no_imu), Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
 
             binding.map.invalidate()
         }
@@ -1570,6 +1616,7 @@ class MainActivity : AppCompatActivity() {
         isViewingHistory = false
         historySession = null
         binding.historyBanner.visibility = View.GONE
+        binding.historyRecomputeProgress.visibility = View.GONE
 
         marker.isEnabled = true
         drMarker.isEnabled = true
