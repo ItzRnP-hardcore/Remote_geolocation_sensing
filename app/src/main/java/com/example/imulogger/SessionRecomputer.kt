@@ -50,7 +50,6 @@ object SessionRecomputer {
         var startLon = Double.NaN
         var startSpeed = 0f
         var startBearing = 0f
-        var firstMovingBearing: Float? = null
         var hasStartFix = false
 
         BufferedReader(FileReader(gpsFile)).use { reader ->
@@ -79,16 +78,10 @@ object SessionRecomputer {
                     startBearing = brg
                     hasStartFix = true
                 }
-                if (firstMovingBearing == null && spd >= 1.5f && brg > 0f) {
-                    firstMovingBearing = brg
-                }
             }
         }
 
         if (!hasStartFix || gpsPoints.isEmpty()) return@withContext null
-        if (startBearing == 0f && firstMovingBearing != null) {
-            startBearing = firstMovingBearing
-        }
         val lastGps = gpsPoints.last()
 
         // 2. Compute original drift from old deadreckon.csv if available
@@ -138,9 +131,7 @@ object SessionRecomputer {
 
         dr.position?.let {
             recomputedTrack.add(it)
-            mapMatcher?.update(it.lat, it.lon, startBearing.toDouble(), startSpeed.toDouble(), 0.0, forceSnap = true)?.let { m ->
-                mapMatchedTrack.add(TrackPoint(m.lat, m.lon))
-            }
+            mapMatchedTrack.add(it)
         }
 
         val rot = FloatArray(9)
@@ -245,17 +236,15 @@ object SessionRecomputer {
                                         val course = dr.courseDeg
                                         val speed = dr.speed
                                         val uncertainty = dr.positionSigmaM
-                                        val m = mapMatcher?.update(p.lat, p.lon, course, speed, uncertainty, forceSnap = true)
+                                        val m = mapMatcher?.update(p.lat, p.lon, course, speed, uncertainty)
                                         if (m != null) {
-                                            val last = mapMatchedTrack.lastOrNull()
-                                            val hopOk = last == null || haversine(last.lat, last.lon, m.lat, m.lon) <= 35.0
-                                            if (hopOk) {
-                                                mapMatchedTrack.add(TrackPoint(m.lat, m.lon))
-                                            }
-                                            // Close the loop: feed road bearing back to DeadReckoner heading only when close and confident
-                                            if (m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE && m.correctionM <= 20.0) {
+                                            mapMatchedTrack.add(TrackPoint(m.lat, m.lon))
+                                            // Close the loop: feed road bearing back to DeadReckoner heading
+                                            if (m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE) {
                                                 dr.applyHeadingCorrection(m.roadBearingDeg, MapMatcher.HEADING_FEEDBACK_GAIN)
                                             }
+                                        } else {
+                                            mapMatchedTrack.add(p)
                                         }
                                     }
                                 }
@@ -270,6 +259,7 @@ object SessionRecomputer {
 
         dr.position?.let {
             recomputedTrack.add(it)
+            mapMatchedTrack.add(it)
         }
         onProgress(100)
 
@@ -277,10 +267,8 @@ object SessionRecomputer {
         val finalDr = recomputedTrack.last()
         val newDriftM = haversine(finalDr.lat, finalDr.lon, lastGps.lat, lastGps.lon)
 
-        val finalMm = mapMatchedTrack.lastOrNull() ?: finalDr
-        val mapMatchedDriftM = if (mapMatchedTrack.isNotEmpty()) {
-            haversine(finalMm.lat, finalMm.lon, lastGps.lat, lastGps.lon)
-        } else Double.NaN
+        val finalMm = mapMatchedTrack.last()
+        val mapMatchedDriftM = haversine(finalMm.lat, finalMm.lon, lastGps.lat, lastGps.lon)
 
         var totalDistM = 0.0
         for (i in 0 until gpsPoints.size - 1) {
