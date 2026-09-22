@@ -1176,12 +1176,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render(status: LoggerStatus) {
-        binding.chipState.text = when {
-            status.error != null -> "Error"
-            status.running -> getString(R.string.recording)
-            else -> getString(R.string.idle)
-        }
-
         if (status.error != null && !panelExpanded) setPanelExpanded(true)
 
         val speedKmh = if (status.running && status.lastSpeedMps != null) status.lastSpeedMps * 3.6f else 0f
@@ -1197,33 +1191,6 @@ class MainActivity : AppCompatActivity() {
             hasFineLocation() -> getString(R.string.start)
             else -> getString(R.string.grant_permissions)
         }
-
-        val quality = status.gnssQuality
-        if (quality == GnssQuality.GOOD && lastGnssQuality != GnssQuality.GOOD) {
-            binding.chipGnss.animate().scaleX(1.08f).scaleY(1.08f).setDuration(150).withEndAction {
-                binding.chipGnss.animate().scaleX(1.0f).scaleY(1.0f).setDuration(150).start()
-            }.start()
-        }
-        lastGnssQuality = quality
-        binding.chipGnss.setText(
-            when (quality) {
-                GnssQuality.GOOD -> R.string.gnss_good
-                GnssQuality.WEAK -> R.string.gnss_weak
-                GnssQuality.LOST -> R.string.gnss_lost
-                GnssQuality.IDLE -> R.string.gnss_idle
-            }
-        )
-        binding.chipGnss.setTextColor(
-            ContextCompat.getColor(
-                this,
-                when (quality) {
-                    GnssQuality.GOOD -> R.color.quality_good
-                    GnssQuality.WEAK -> R.color.quality_weak
-                    GnssQuality.LOST -> R.color.quality_lost
-                    GnssQuality.IDLE -> R.color.quality_idle
-                },
-            )
-        )
 
         maybeAutoPrefetch(status)
         updateCoverageHint(status)
@@ -1555,7 +1522,8 @@ class MainActivity : AppCompatActivity() {
                 binding.map.post { binding.map.zoomToBoundingBox(bounds, true) }
             }
 
-            // Show History banner
+            // Show History banner (ensure search is collapsed so historyBanner is never obstructed)
+            setSearchExpanded(false)
             binding.tvHistoryTitle.text = "Viewing: ${summary.formattedDate}"
             val durSec = summary.durationSeconds.toLong()
             val durStr = String.format(Locale.US, "%d:%02d", durSec / 60, durSec % 60)
@@ -1931,6 +1899,16 @@ class MainActivity : AppCompatActivity() {
         binding.rvSearchSuggestions.layoutManager = LinearLayoutManager(this)
         var searchJob: kotlinx.coroutines.Job? = null
 
+        binding.btnSearchExpand.setOnClickListener {
+            hapticClick()
+            setSearchExpanded(true)
+        }
+
+        binding.btnCloseSearch.setOnClickListener {
+            hapticClick()
+            setSearchExpanded(false)
+        }
+
         binding.etSearchDestination.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -1945,18 +1923,23 @@ class MainActivity : AppCompatActivity() {
                             ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
                         val results = NavigationRouter.searchPlaces(query, loc?.latitude, loc?.longitude)
                         if (results.isNotEmpty()) {
+                            binding.suggestionsCard.visibility = View.VISIBLE
                             binding.rvSearchSuggestions.visibility = View.VISIBLE
                             binding.rvSearchSuggestions.adapter = SearchSuggestionAdapter(results, loc) { selected ->
                                 binding.etSearchDestination.setText(selected.title)
+                                binding.suggestionsCard.visibility = View.GONE
                                 binding.rvSearchSuggestions.visibility = View.GONE
                                 hideKeyboard()
+                                setSearchExpanded(false)
                                 navigateTo(GeoPoint(selected.lat, selected.lon), selected.title)
                             }
                         } else {
+                            binding.suggestionsCard.visibility = View.GONE
                             binding.rvSearchSuggestions.visibility = View.GONE
                         }
                     }
                 } else {
+                    binding.suggestionsCard.visibility = View.GONE
                     binding.rvSearchSuggestions.visibility = View.GONE
                 }
             }
@@ -1965,12 +1948,33 @@ class MainActivity : AppCompatActivity() {
         binding.btnClearSearch.setOnClickListener {
             hapticClick()
             binding.etSearchDestination.text?.clear()
+            binding.suggestionsCard.visibility = View.GONE
             binding.rvSearchSuggestions.visibility = View.GONE
         }
 
         binding.btnExitNav.setOnClickListener {
             hapticClick()
             clearNavigation()
+        }
+    }
+
+    private fun setSearchExpanded(expanded: Boolean) {
+        if (expanded) {
+            binding.btnSearchExpand.visibility = View.GONE
+            binding.layoutSearchExpanded.visibility = View.VISIBLE
+            binding.btnHistory.visibility = View.GONE
+            binding.btnTheme.visibility = View.GONE
+            binding.etSearchDestination.requestFocus()
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.showSoftInput(binding.etSearchDestination, InputMethodManager.SHOW_IMPLICIT)
+        } else {
+            binding.layoutSearchExpanded.visibility = View.GONE
+            binding.btnSearchExpand.visibility = View.VISIBLE
+            binding.btnHistory.visibility = View.VISIBLE
+            binding.btnTheme.visibility = View.VISIBLE
+            binding.suggestionsCard.visibility = View.GONE
+            binding.rvSearchSuggestions.visibility = View.GONE
+            hideKeyboard()
         }
     }
 
@@ -2044,7 +2048,9 @@ class MainActivity : AppCompatActivity() {
         routeLine.setPoints(emptyList())
         routeLine.isEnabled = false
         binding.navHudCard.visibility = View.GONE
+        setSearchExpanded(false)
         binding.etSearchDestination.text?.clear()
+        binding.suggestionsCard.visibility = View.GONE
         binding.rvSearchSuggestions.visibility = View.GONE
         hideKeyboard()
         binding.map.invalidate()
