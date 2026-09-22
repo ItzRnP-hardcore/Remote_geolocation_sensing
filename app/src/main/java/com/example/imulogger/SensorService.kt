@@ -708,10 +708,11 @@ class SensorService : Service() {
         snapCorrection = m.correctionM
         snapRoadClass = m.roadClass
         snapConfidence = m.confidence
+        val feedHeading = m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE && m.correctionM <= 20.0
         loggerHandler.post {
             recordSnap(
                 tNs, dr, m.lat, m.lon, m.correctionM, m.roadClass, m.confidence,
-                m.roadBearingDeg, m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE,
+                m.roadBearingDeg, feedHeading,
                 MODE_MATCH,
             )
         }
@@ -779,8 +780,11 @@ class SensorService : Service() {
         feedHeadingBack: Boolean,
         mode: String,
     ) {
-        snapPoints.add(TrackPoint(lat, lon, GnssQuality.GOOD))
-        _snapTrack.value = ArrayList(snapPoints)
+        val lastSnap = snapPoints.lastOrNull()
+        if (lastSnap == null || metresBetween(lastSnap.lat, lastSnap.lon, lat, lon) <= 35.0) {
+            snapPoints.add(TrackPoint(lat, lon, GnssQuality.GOOD))
+            _snapTrack.value = ArrayList(snapPoints)
+        }
 
         // Close the loop: hand the road's bearing back to the integrator as a heading observation.
         // Position is deliberately not corrected — the snapped track is drawn from the matcher's

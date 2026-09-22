@@ -30,8 +30,8 @@ class MapMatcher(private val roads: RoadNetwork) {
 
     companion object {
         /** How far from a fix to look for road candidates. Widened as the estimate drifts. */
-        private const val BASE_SEARCH_RADIUS_M = 60.0
-        private const val MAX_SEARCH_RADIUS_M = 400.0
+        private const val BASE_SEARCH_RADIUS_M = 40.0
+        private const val MAX_SEARCH_RADIUS_M = 85.0
 
         /**
          * Emission spread, metres. Newson & Krumm fit ~4.07 m for GPS; this is far larger because
@@ -78,6 +78,7 @@ class MapMatcher(private val roads: RoadNetwork) {
          * perfectly dead-reckoned position sits off the centreline by about this much.
          */
         private const val MIN_CORRECTION_BUDGET_M = 12.0
+        private const val MAX_CORRECTION_BUDGET_M = 45.0
 
         /**
          * Uncertainty below which the matcher declines to snap at all.
@@ -144,10 +145,11 @@ class MapMatcher(private val roads: RoadNetwork) {
         courseDeg: Double?,
         speedMps: Double,
         uncertaintyM: Double,
+        forceSnap: Boolean = false,
     ): Match? {
         // Snapping a fix that is already better than the map makes it worse. Declining is the
         // correct answer, not a missed opportunity - see MIN_UNCERTAINTY_TO_SNAP_M.
-        if (uncertaintyM < MIN_UNCERTAINTY_TO_SNAP_M) {
+        if (!forceSnap && uncertaintyM < MIN_UNCERTAINTY_TO_SNAP_M) {
             // The chain is still advanced so hypotheses stay warm for when aiding is lost.
             lastLat = lat
             lastLon = lon
@@ -188,23 +190,54 @@ class MapMatcher(private val roads: RoadNetwork) {
             }
 
             // Transition: consistency with where the previous best states could have reached.
-            val best = if (beam.isEmpty()) 0.0 else beam.maxOf { h ->
-                val hop = metres(h.lat, h.lon, c.lat, c.lon)
-                val mismatch = abs(hop - stepM)
-                var t = -0.5 * (mismatch / TRANSITION_SIGMA_M).let { it * it }
-                // Staying on the same road is the common case; a small bonus stops the matcher
-                // flickering between parallel candidates at a junction.
-                if (h.segment === c.segment) t += 0.5
-                // Kinematic turn penalty: sharp turn transitions between crossing roads at high speeds are physically improbable
-                if (h.segment !== c.segment && speedMps > 6.0) {
-                    val turnAngle = undirectedBearingDelta(h.segment.bearingDeg, c.segment.bearingDeg)
-                    if (turnAngle > 50.0) {
-                        t -= ((turnAngle - 50.0) / 25.0) * (speedMps / 6.0)
+            val best = if (beam.isEmpty()) 0.0 else {
+                var maxScore = Double.NEGATIVE_INFINITY
+                for (h in beam) {
+                    val hop = metres(h.lat, h.lon, c.lat, c.lon)
+                    // Physical hop distance gating: in 0.5s at vehicle speed, the jump cannot exceed what the vehicle can travel
+                    val maxPhysicalHop = max(18.0, speedMps * 1.5 + 8.0)
+                    if (hop > maxPhysicalHop) continue
+
+                    val isSameRoad = h.segment === c.segment
+                    val connects = isSameRoad || h.segment.connectsWith(c.segment)
+
+                    // Topological connectivity constraint: do NOT jump between disconnected roads across grass/parks
+                    if (!connects && hop > 15.0) continue
+
+                    val mismatch = abs(hop - stepM)
+                    var t = -0.5 * (mismatch / TRANSITION_SIGMA_M).let { it * it }
+                    if (isSameRoad) {
+                        t += 1.0
+                    } else if (!connects) {
+                        t -= 50.0
+                    }
+
+                    // Kinematic turn penalty: sharp turn transitions between crossing roads at high speeds are physically improbable
+                    if (!isSameRoad && speedMps > 5.0) {
+                        val turnAngle = undirectedBearingDelta(h.segment.bearingDeg, c.segment.bearingDeg)
+                        if (turnAngle > 45.0) {
+                            t -= ((turnAngle - 45.0) / 20.0) * (speedMps / 5.0)
+                        }
+                    }
+
+                    val candidateScore = h.logProb + t
+                    if (candidateScore > maxScore) {
+                        maxScore = candidateScore
                     }
                 }
-                h.logProb + t
+                maxScore
             }
-            next.add(Hypothesis(c.lat, c.lon, c.segment, score + best))
+
+            if (best > Double.NEGATIVE_INFINITY) {
+                next.add(Hypothesis(c.lat, c.lon, c.segment, score + best))
+            }
+        }
+
+        if (next.isEmpty()) {
+            beam = emptyList()
+            lastLat = lat
+            lastLon = lon
+            return null
         }
 
         // Normalise so log-probabilities do not run away over a long session.
@@ -244,7 +277,7 @@ class MapMatcher(private val roads: RoadNetwork) {
         // same as being wrong yet, so the gate is the uncertainty itself rather than GNSS state.
         // The floor keeps a small correction available when drift is still near zero, since road
         // centrelines and the true driving line differ by a lane's width regardless.
-        val budget = max(uncertaintyM, MIN_CORRECTION_BUDGET_M)
+        val budget = max(uncertaintyM, MIN_CORRECTION_BUDGET_M).coerceAtMost(MAX_CORRECTION_BUDGET_M)
         if (correction > budget) return null
 
         return Match(

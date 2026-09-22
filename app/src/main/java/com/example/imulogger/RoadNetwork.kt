@@ -61,7 +61,23 @@ class RoadNetwork(private val mapFile: File) {
         val bearingDeg: Double,
         val roadClass: String,
         val oneway: Boolean,
-    )
+    ) {
+        /** Check if this segment connects with [other] at a shared node or intersection. */
+        fun connectsWith(other: Segment, toleranceM: Double = 18.0): Boolean {
+            if (this === other) return true
+            return endpointDist(aLat, aLon, other.aLat, other.aLon) <= toleranceM ||
+                   endpointDist(aLat, aLon, other.bLat, other.bLon) <= toleranceM ||
+                   endpointDist(bLat, bLon, other.aLat, other.aLon) <= toleranceM ||
+                   endpointDist(bLat, bLon, other.bLat, other.bLon) <= toleranceM
+        }
+
+        private fun endpointDist(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+            val mLon = M_PER_DEG_LAT * cos(Math.toRadians((lat1 + lat2) / 2))
+            val dx = (lon2 - lon1) * mLon
+            val dy = (lat2 - lat1) * M_PER_DEG_LAT
+            return sqrt(dx * dx + dy * dy)
+        }
+    }
 
     /** A projected position on a segment, with how far off it was. */
     class Candidate(
