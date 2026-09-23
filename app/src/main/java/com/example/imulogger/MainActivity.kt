@@ -626,63 +626,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Repaint the stretches where GNSS was degraded or withheld, on top of the base track.
-     * Splits into separate road polylines whenever consecutive points have a gap > 35m
-     * to prevent unnatural straight lines cutting across grass or disconnected roads.
+     * Repaint the road-matched track on top of the base track as a continuous, unbroken line.
+     * Intermediate road vertices are bridged via RoadGraph routing so the path follows streets
+     * continuously without gaps.
      */
     private fun renderSnapTrack(points: List<TrackPoint>) {
         val overlays = binding.map.overlays
         snapSegments.forEach { overlays.remove(it) }
         snapSegments.clear()
-        snapLine.setPoints(emptyList())
 
-        if (points.isEmpty()) {
-            binding.map.invalidate()
-            return
-        }
-
-        val baseAt = overlays.indexOf(snapLine).takeIf { it >= 0 } ?: (overlays.indexOf(routeLine) + 1).coerceIn(0, overlays.size)
-
-        val segments = mutableListOf<MutableList<GeoPoint>>()
-        var currentSegment = mutableListOf<GeoPoint>()
-        var lastPt: TrackPoint? = null
-
-        for (pt in points) {
-            val last = lastPt
-            if (last != null) {
-                val mLon = 111132.0 * kotlin.math.cos(Math.toRadians((last.lat + pt.lat) / 2))
-                val dx = (pt.lon - last.lon) * mLon
-                val dy = (pt.lat - last.lat) * 111132.0
-                val distM = kotlin.math.sqrt(dx * dx + dy * dy)
-                if (distM > 35.0) {
-                    if (currentSegment.isNotEmpty()) {
-                        segments.add(currentSegment)
-                        currentSegment = mutableListOf()
-                    }
-                }
-            }
-            currentSegment.add(GeoPoint(pt.lat, pt.lon))
-            lastPt = pt
-        }
-        if (currentSegment.isNotEmpty()) {
-            segments.add(currentSegment)
-        }
-
-        for (seg in segments) {
-            val pts = if (seg.size == 1) listOf(seg[0], seg[0]) else seg
-            val poly = Polyline(binding.map).apply {
-                setPoints(pts)
-                outlinePaint.color = ContextCompat.getColor(this@MainActivity, R.color.track_snap)
-                outlinePaint.strokeWidth = 7f
-                outlinePaint.strokeCap = Paint.Cap.ROUND
-                outlinePaint.strokeJoin = Paint.Join.ROUND
-                isEnabled = showSnapTrack
-            }
-            snapSegments.add(poly)
-        }
-
-        snapSegments.forEachIndexed { idx, poly ->
-            overlays.add((baseAt + idx).coerceAtMost(overlays.size), poly)
+        snapLine.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+        snapLine.isEnabled = showSnapTrack
+        if (!overlays.contains(snapLine)) {
+            val baseAt = (overlays.indexOf(routeLine) + 1).coerceIn(0, overlays.size)
+            overlays.add(baseAt, snapLine)
         }
         binding.map.invalidate()
     }

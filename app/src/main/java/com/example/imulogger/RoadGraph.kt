@@ -240,12 +240,16 @@ class RoadGraph(val segments: List<RoadNetwork.Segment>) {
         val startState = nearestState(startLat, startLon, null, snapRadiusM) ?: return null
         val destState = nearestState(destLat, destLon, null, snapRadiusM) ?: return null
 
-        if (startState.segment == destState.segment && startState.direction == destState.direction) {
+        if (startState.segment == destState.segment) {
+            val p1 = pointAt(startState.segment, startState.offsetM, startState.direction)
+            val p2 = pointAt(destState.segment, destState.offsetM, destState.direction)
             val pts = listOf(
-                pointAt(startState.segment, startState.offsetM, startState.direction),
-                pointAt(destState.segment, destState.offsetM, destState.direction),
+                TrackPoint(startLat, startLon),
+                p1,
+                p2,
+                TrackPoint(destLat, destLon),
             )
-            val d = abs(destState.offsetM - startState.offsetM)
+            val d = metres(p1.lat, p1.lon, p2.lat, p2.lon)
             return RouteResult(pts, d)
         }
 

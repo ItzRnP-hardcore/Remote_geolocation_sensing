@@ -243,7 +243,26 @@ object SessionRecomputer {
                                         val uncertainty = dr.positionSigmaM
                                         val m = mapMatcher?.update(p.lat, p.lon, course, speed, uncertainty, forceSnap = true)
                                         if (m != null) {
-                                            mapMatchedTrack.add(TrackPoint(m.lat, m.lon))
+                                            val newPt = TrackPoint(m.lat, m.lon)
+                                            val lastPt = mapMatchedTrack.lastOrNull()
+                                            if (lastPt != null) {
+                                                val gapM = haversine(lastPt.lat, lastPt.lon, newPt.lat, newPt.lon)
+                                                if (gapM > 15.0 && gapM < 800.0) {
+                                                    val roadPath = roadNetwork?.graphNear(lastPt.lat, lastPt.lon)?.findPath(
+                                                        startLat = lastPt.lat,
+                                                        startLon = lastPt.lon,
+                                                        destLat = newPt.lat,
+                                                        destLon = newPt.lon,
+                                                        snapRadiusM = 150.0,
+                                                    )
+                                                    if (roadPath != null && roadPath.points.size > 2) {
+                                                        for (k in 1 until roadPath.points.size - 1) {
+                                                            mapMatchedTrack.add(roadPath.points[k])
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            mapMatchedTrack.add(newPt)
                                             // Close the loop: feed road bearing back to DeadReckoner heading
                                             if (m.confidence >= MapMatcher.HEADING_FEEDBACK_MIN_CONFIDENCE && m.correctionM <= 25.0) {
                                                 dr.applyHeadingCorrection(m.roadBearingDeg, MapMatcher.HEADING_FEEDBACK_GAIN)

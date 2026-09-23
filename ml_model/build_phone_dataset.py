@@ -54,16 +54,28 @@ def process_session(sess_dir):
         sess = se.load_session(sess_dir)
         grid = se.build_grid(sess)
     except Exception as e:
-        # Ignore empty/corrupted sessions
+        # Log the reason so we know what to fix
+        print(f"  [SKIP] {name}: {e}")
         return None
 
     speed = grid["speed"]
     valid_speed = np.isfinite(speed)
-    if valid_speed.sum() < 30:
-        return None  # Skip if less than 3 seconds of valid speed
+    if valid_speed.sum() < 20:
+        print(f"  [SKIP] {name}: only {valid_speed.sum()} valid speed samples")
+        return None
+
+    # Check rotation vector availability
+    if "R" not in grid or grid["R"] is None:
+        print(f"  [SKIP] {name}: no rotation vector data")
+        return None
 
     # Accelerometer in Earth frame (vertical gravity subtracted)
-    acc_earth = se.earth_frame(grid["acc"], grid["R"])
+    try:
+        acc_earth = se.earth_frame(grid["acc"], grid["R"])
+    except Exception as e:
+        print(f"  [SKIP] {name}: earth_frame failed: {e}")
+        return None
+
     gyr = grid["gyro"]
 
     # 6 channels: eax, eay, eaz - 9.80665, gx, gy, gz
@@ -111,12 +123,29 @@ def process_session(sess_dir):
         targets.append([sp, is_stat, yr, lat_acc])
 
     if not windows:
+        print(f"  [SKIP] {name}: no valid windows extracted")
         return None
+
+    windows_arr = np.stack(windows).astype(np.float32)  # (B, 6, 100)
+    targets_arr = np.array(targets, dtype=np.float32)    # (B, 4)
+
+    # Speed-stratified upsampling: duplicate high-speed windows (>5 m/s)
+    # to counterbalance the heavy stationary/slow bias
+    fast_mask = targets_arr[:, 0] > 5.0
+    n_fast = fast_mask.sum()
+    if n_fast > 0 and n_fast < len(targets_arr) * 0.3:
+        # Upsample fast windows to 30% of dataset
+        n_needed = int(len(targets_arr) * 0.3) - n_fast
+        if n_needed > 0:
+            fast_idx = np.where(fast_mask)[0]
+            upsample_idx = np.random.choice(fast_idx, size=min(n_needed, len(fast_idx) * 3), replace=True)
+            windows_arr = np.concatenate([windows_arr, windows_arr[upsample_idx]], axis=0)
+            targets_arr = np.concatenate([targets_arr, targets_arr[upsample_idx]], axis=0)
 
     return {
         "name": name,
-        "windows": np.stack(windows).astype(np.float32),  # (B, 6, 100)
-        "targets": np.array(targets, dtype=np.float32),   # (B, 4)
+        "windows": windows_arr,
+        "targets": targets_arr,
     }
 
 

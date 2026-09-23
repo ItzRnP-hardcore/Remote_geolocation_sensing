@@ -65,10 +65,11 @@ def infer_geometry(state):
         channels.append(state[f"blocks.{i}.conv1.weight"].shape[0])
         i += 1
     if not channels:
-        return None, None
+        return None, None, None
     stem = state["stem.0.weight"].shape[0] if "stem.0.weight" in state else 64
     dilations = tuple(2 ** k for k in range(len(channels)))
-    return (stem, tuple(channels), dilations)
+    has_input_norm = "input_norm.running_mean" in state
+    return (stem, tuple(channels), dilations, has_input_norm)
 
 
 def export(weights_path: str, export_path: str) -> None:
@@ -80,15 +81,15 @@ def export(weights_path: str, export_path: str) -> None:
 
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     geom = infer_geometry(state)
-    if geom is None:
+    if geom[0] is None:
         raise RuntimeError(
             f"{weights_path} has no TCN blocks. A ResNet1D checkpoint cannot be "
             f"exported by this script; retrain with ml_model/train_iovnbd.py."
         )
-    stem, channels, dilations = geom
-    print(f"checkpoint geometry: stem {stem}, channels {channels}, dilations {dilations}")
+    stem, channels, dilations, has_input_norm = geom
+    print(f"checkpoint geometry: stem {stem}, channels {channels}, dilations {dilations}, input_norm={has_input_norm}")
 
-    model = TCNModel(stem_width=stem, channels=channels, dilations=dilations)
+    model = TCNModel(stem_width=stem, channels=channels, dilations=dilations, input_norm=has_input_norm)
     # Without this the export is a freshly initialised network. It still traces,
     # still loads on the phone, and still returns plausible-looking floats, so
     # nothing downstream can tell that the model was never trained.

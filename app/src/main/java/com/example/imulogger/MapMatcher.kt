@@ -31,7 +31,7 @@ class MapMatcher(private val roads: RoadNetwork) {
     companion object {
         /** How far from a fix to look for road candidates. Widened as the estimate drifts. */
         private const val BASE_SEARCH_RADIUS_M = 60.0
-        private const val MAX_SEARCH_RADIUS_M = 100.0
+        private const val MAX_SEARCH_RADIUS_M = 150.0
 
         /**
          * Emission spread, metres. Newson & Krumm fit ~4.07 m for GPS; this is far larger because
@@ -155,7 +155,8 @@ class MapMatcher(private val roads: RoadNetwork) {
             return null
         }
 
-        val radius = (BASE_SEARCH_RADIUS_M + uncertaintyM).coerceAtMost(MAX_SEARCH_RADIUS_M)
+        val maxRadius = if (forceSnap) MAX_SEARCH_RADIUS_M else 100.0
+        val radius = (BASE_SEARCH_RADIUS_M + uncertaintyM).coerceAtMost(maxRadius)
         val candidates = roads.candidatesNear(lat, lon, radius)
             .sortedBy { it.distanceM }
             .take(MAX_CANDIDATES)
@@ -249,7 +250,8 @@ class MapMatcher(private val roads: RoadNetwork) {
         // same as being wrong yet, so the gate is the uncertainty itself rather than GNSS state.
         // The floor keeps a small correction available when drift is still near zero, since road
         // centrelines and the true driving line differ by a lane's width regardless.
-        val budget = max(uncertaintyM, MIN_CORRECTION_BUDGET_M).coerceAtMost(60.0)
+        val maxBudget = if (forceSnap) 150.0 else 60.0
+        val budget = max(uncertaintyM, MIN_CORRECTION_BUDGET_M).coerceAtMost(maxBudget)
         if (correction > budget) return null
 
         return Match(

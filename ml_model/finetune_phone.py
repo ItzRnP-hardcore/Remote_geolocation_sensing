@@ -116,16 +116,22 @@ def main():
 
     print(f"Dataset: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
 
-    # Model architecture
-    model = TCNModel(channels=(64, 64, 64, 64, 64, 64), dilations=(1, 2, 4, 8, 16, 32))
+    # Model architecture with InputNorm — normalizes raw features inside the graph
+    model = TCNModel(channels=(64, 64, 64, 64, 64, 64), dilations=(1, 2, 4, 8, 16, 32), input_norm=True)
 
-    # Load initial weights from IOVNBD wide earth checkpoint
-    init_weights = "ml_model/model_tcn_base_wide_earth.pth"
-    if not os.path.exists(init_weights):
-        init_weights = "ml_model/model_tcn_base_earth_s0.pth"
-    if not os.path.exists(init_weights):
-        init_weights = "ml_model/model_tcn_base_fx.pth"
-    if os.path.exists(init_weights):
+    # Load initial weights — prefer InputNorm checkpoint, fall back to older ones
+    init_candidates = [
+        "ml_model/model_tcn_base_inorm_earth.pth",     # New: trained with InputNorm
+        "ml_model/model_tcn_base_wide_earth.pth",       # Old: no InputNorm
+        "ml_model/model_tcn_base_earth_s0.pth",
+        "ml_model/model_tcn_base_fx.pth",
+    ]
+    init_weights = None
+    for cand in init_candidates:
+        if os.path.exists(cand):
+            init_weights = cand
+            break
+    if init_weights:
         print(f"Loading initial weights from {init_weights}...")
         state = torch.load(init_weights, map_location="cpu", weights_only=True)
         model.load_state_dict(state, strict=False)

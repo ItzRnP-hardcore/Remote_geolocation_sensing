@@ -53,3 +53,8 @@ ml_model/dataset_*.pt
 ml_model/dataset_*_meta.json
 ml_model/*.log
 ml_model/train_iovnbd_results_*.json
+
+# Scratch artefacts (except tracked classes.jar)
+scratch/*
+!scratch/classes.jar
+

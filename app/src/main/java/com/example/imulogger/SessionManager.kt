@@ -110,8 +110,13 @@ object SessionManager {
      */
     suspend fun loadSession(summary: SessionSummary): LoadedSession = withContext(Dispatchers.IO) {
         val gpsPoints = parseGpsCsv(File(summary.dir, "gps.csv"))
-        val drPoints = parseDrCsv(File(summary.dir, "deadreckon.csv"))
-        val snapPoints = parseSnapCsv(File(summary.dir, "mapmatch.csv"))
+        val recomputedDr = File(summary.dir, "deadreckon_recomputed.csv")
+        val drFile = if (recomputedDr.exists() && recomputedDr.length() > 50) recomputedDr else File(summary.dir, "deadreckon.csv")
+        val drPoints = parseDrCsv(drFile)
+
+        val recomputedSnap = File(summary.dir, "mapmatch_recomputed.csv")
+        val snapFile = if (recomputedSnap.exists() && recomputedSnap.length() > 50) recomputedSnap else File(summary.dir, "mapmatch.csv")
+        val snapPoints = parseSnapCsv(snapFile)
 
         var minLat = 90.0
         var maxLat = -90.0
@@ -225,8 +230,12 @@ object SessionManager {
             BufferedReader(FileReader(file)).use { reader ->
                 val headerLine = reader.readLine() ?: return emptyList()
                 val headers = headerLine.split(',').map { it.trim() }
-                val latIdx = headers.indexOf("snap_lat")
-                val lonIdx = headers.indexOf("snap_lon")
+                var latIdx = headers.indexOf("snap_lat")
+                var lonIdx = headers.indexOf("snap_lon")
+                if (latIdx < 0 || lonIdx < 0) {
+                    latIdx = headers.indexOf("lat")
+                    lonIdx = headers.indexOf("lon")
+                }
                 if (latIdx < 0 || lonIdx < 0) return emptyList()
 
                 var line = reader.readLine()

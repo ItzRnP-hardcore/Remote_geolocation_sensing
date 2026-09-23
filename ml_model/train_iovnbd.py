@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tcn_model import TCNModel
-from losses import multitask_loss, compute_pos_weight
+from losses import multitask_loss, compute_pos_weight, smoothness
 
 DT = 0.1              # 10 Hz
 STRIDE = 50           # samples between consecutive window ends; see build_dataset_iovnbd
@@ -57,8 +57,9 @@ def evaluate(model, Xs, Xr, Y, runs, mean_speed, batch=256):
     model.eval()
     mus, yaws, lvs = [], [], []
     with torch.no_grad():
-        for i in range(0, len(Xs), batch):
-            o = model(Xs[i:i + batch])
+        for i in range(0, len(Xr), batch):
+            # Feed raw features — InputNorm inside model handles normalization
+            o = model(Xr[i:i + batch])
             mus.append(o["mu"]); yaws.append(o["yaw_rate"]); lvs.append(o["logvar"])
     mu = torch.cat(mus); yaw = torch.cat(yaws); lv = torch.cat(lvs)
     sp, yr = Y[:, 0], Y[:, 2]
@@ -90,18 +91,33 @@ def train_variant(name, weights, data, epochs, lr, seed, out_dir,
     
     # We use TCNModel with proper dilations for 100 samples
     dilations = (1, 2, 4, 8, 16, 32)
-    model = TCNModel(channels=tuple(widths), dilations=dilations)
+    model = TCNModel(channels=tuple(widths), dilations=dilations, input_norm=True)
+
+    # Seed InputNorm from pre-computed stats for faster convergence
+    if model.input_norm is not None and "norm_mean" in data:
+        model.input_norm.init_from_stats(
+            data["norm_mean"].squeeze(),
+            data["norm_sd"].squeeze()
+        )
     
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
-    n = len(Xs_tr)
+    n = len(Xr_tr)
     gen = torch.Generator().manual_seed(seed + 977)
     best = (math.inf, None, -1)
     history = []
     t0 = time.time()
 
     pos_weight = compute_pos_weight(Y_tr[:, 1])
+
+    # Speed-dependent loss weighting: windows with speed > 5 m/s get 2x weight
+    speed_weights = torch.ones(n)
+    fast_mask = Y_tr[:, 0] > 5.0
+    speed_weights[fast_mask] = 2.0
+
+    # Pre-compute session-sorted indices for smoothness loss (fix for broken shuffled ordering)
+    sort_order = torch.argsort(runs_tr * 100000 + torch.arange(n))
 
     for ep in range(epochs):
         model.train()
@@ -112,11 +128,14 @@ def train_variant(name, weights, data, epochs, lr, seed, out_dir,
             idx = perm[i:i + 64]
             yb = Y_tr[idx]
             wb = W_tr[idx] if W_tr is not None else None
+            sw = speed_weights[idx]
+
+            # Feed RAW features — InputNorm inside model handles normalization
             if augment_kinds:
                 raw = augment(Xr_tr[idx], augment_kinds, gen)
-                xb = (raw - data["norm_mean"]) / data["norm_sd"]
             else:
-                raw, xb = Xr_tr[idx], Xs_tr[idx]
+                raw = Xr_tr[idx]
+            xb = raw
                 
             out = model(xb)
             
@@ -128,7 +147,10 @@ def train_variant(name, weights, data, epochs, lr, seed, out_dir,
                 "gyro_yaw": raw[:, 5, :]  # Channel 5 is gyro_z (yaw)
             }
             if wb is not None:
-                targets["weight"] = wb
+                # Combine quality weights with speed weights
+                targets["weight"] = wb * sw
+            else:
+                targets["weight"] = sw
                 
             losses = multitask_loss(out, targets, pos_weight=pos_weight, weights=weights)
             loss = losses["total"]
@@ -140,8 +162,31 @@ def train_variant(name, weights, data, epochs, lr, seed, out_dir,
             
             tot += loss.item()
             steps += 1
+
+        # Smoothness pass: run session-sorted windows through the model and compute
+        # smoothness loss only, fixing the bug where shuffled batches destroyed
+        # temporal ordering.
+        if weights.get("smoothness", 0.1) > 0:
+            model.train()
+            smooth_tot = 0.0
+            smooth_steps = 0
+            for i in range(0, n - 1, 128):
+                s_idx = sort_order[i:i + 128]
+                with torch.no_grad():
+                    s_out = model(Xr_tr[s_idx])
+                # Only compute smoothness gradient on the model
+                s_out_grad = model(Xr_tr[s_idx])
+                s_loss = smoothness(s_out_grad["mu"], runs_tr[s_idx]) * weights.get("smoothness", 0.1)
+                if s_loss.item() > 0:
+                    opt.zero_grad()
+                    s_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    opt.step()
+                    smooth_tot += s_loss.item()
+                    smooth_steps += 1
             
         sched.step()
+
 
         va = evaluate(model, Xs_va, Xr_va, Y_va, runs_va, mean_speed)
         history.append({"epoch": ep, "loss": tot / steps, "val_rmse": va["speed_rmse"]})

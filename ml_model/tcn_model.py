@@ -79,6 +79,50 @@ class TCNBlock(nn.Module):
         return self.relu(out + residual)
 
 
+class InputNorm(nn.Module):
+    """Learnable per-channel input normalization.
+
+    Replaces the external ``(x - mu) / sd`` step that must be kept in sync between
+    the training script and the on-device runner.  By putting it inside the model
+    graph, the exported TorchScript asset carries its own normalization, so
+    ``IMUModelRunner`` can feed raw sensor values and get the right answer.
+
+    Behaves like BatchNorm1d with ``affine=False`` at inference time: subtracts a
+    running mean and divides by a running standard deviation, both learned from the
+    training data.  Unlike BatchNorm it does NOT learn scale/bias parameters (the
+    stem's own BatchNorm does that), and it is deliberately placed BEFORE the stem
+    so the stem sees normalised input regardless of the sensor's DC level.
+
+    ``init_from_stats(mean, std)`` lets you seed it from a pre-computed dataset
+    normalisation so the first forward pass is already calibrated.
+    """
+
+    def __init__(self, n_channels: int, momentum: float = 0.1, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.momentum = momentum
+        self.register_buffer("running_mean", torch.zeros(n_channels))
+        self.register_buffer("running_var", torch.ones(n_channels))
+
+    def init_from_stats(self, mean: torch.Tensor, std: torch.Tensor):
+        """Seed with pre-computed per-channel statistics."""
+        self.running_mean.copy_(mean.detach().view(-1))
+        self.running_var.copy_((std.detach().view(-1) ** 2).clamp_min(self.eps))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x is (B, C, T)
+        if self.training:
+            with torch.no_grad():
+                # Per-channel mean/var over (B, T)
+                batch_mean = x.mean(dim=(0, 2))
+                batch_var = x.var(dim=(0, 2), unbiased=False)
+                self.running_mean.mul_(1 - self.momentum).add_(self.momentum * batch_mean)
+                self.running_var.mul_(1 - self.momentum).add_(self.momentum * batch_var)
+        mean = self.running_mean.view(1, -1, 1)
+        std = self.running_var.sqrt().clamp_min(self.eps).view(1, -1, 1)
+        return (x - mean) / std
+
+
 class TCNModel(nn.Module):
     """CNN stem -> dilated TCN -> three scalar heads + two per-timestep heads."""
 
@@ -86,10 +130,13 @@ class TCNModel(nn.Module):
                  stem_width: int = 64,
                  channels: tuple[int, ...] = (64, 64, 64, 64, 64, 64),
                  dilations: tuple[int, ...] = (1, 2, 4, 8, 16, 32),
-                 kernel_size: int = 3):
+                 kernel_size: int = 3,
+                 input_norm: bool = True):
         super().__init__()
         if len(channels) != len(dilations):
             raise ValueError("channels and dilations must be the same length")
+
+        self.input_norm = InputNorm(in_channels) if input_norm else None
 
         self.stem = nn.Sequential(
             nn.Conv1d(in_channels, stem_width, kernel_size=7, stride=1,
@@ -124,6 +171,8 @@ class TCNModel(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        if self.input_norm is not None:
+            x = self.input_norm(x)
         seq = self.blocks(self.stem(x))          # (B, C, T)
         pooled = self.pool(seq).flatten(1)       # (B, C)
 
