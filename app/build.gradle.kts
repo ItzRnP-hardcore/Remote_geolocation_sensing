@@ -12,6 +12,10 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     androidResources {
@@ -53,7 +57,6 @@ dependencies {
     
     // PyTorch Android dependencies for ML inference
     implementation("org.pytorch:pytorch_android_lite:2.1.0")
-    implementation("org.pytorch:pytorch_android_torchvision_lite:2.1.0")
 
     testImplementation("junit:junit:4.13.2")
 }

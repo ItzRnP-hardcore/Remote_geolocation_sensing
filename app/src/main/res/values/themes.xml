@@ -4,6 +4,10 @@
         <item name="colorPrimary">@color/brand</item>
         <item name="colorOnPrimary">@color/on_brand</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/overlay_card</item>
+        <item name="colorSurfaceContainer">@color/overlay_card</item>
+        <item name="colorSurfaceContainerHigh">@color/overlay_chip</item>
     </style>
 
     <style name="Metric">

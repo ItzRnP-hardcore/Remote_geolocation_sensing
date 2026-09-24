@@ -11,6 +11,14 @@
         android:orientation="vertical"
         android:padding="24dp">
 
+        <!-- Drag Handle -->
+        <View
+            android:layout_width="48dp"
+            android:layout_height="5dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/bg_drag_handle" />
+
         <!-- Title & Icon -->
         <LinearLayout
             android:layout_width="match_parent"

@@ -38,4 +38,5 @@
     <color name="drag_handle">#66FFFFFF</color>
     <color name="brand_surface">#2A1668C6</color>
     <color name="toggle_active_heading">#1E88E5</color>
+    <color name="recording_pulse">#33FF4444</color>
 </resources>

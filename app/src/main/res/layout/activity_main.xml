@@ -76,6 +76,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_gravity="top"
+            android:animateLayoutChanges="true"
             android:background="@color/overlay_scrim"
             android:orientation="vertical"
             android:paddingHorizontal="16dp"
@@ -85,6 +86,7 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:animateLayoutChanges="true"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -93,7 +95,7 @@
                     android:id="@+id/btnSearchExpand"
                     android:layout_width="44dp"
                     android:layout_height="44dp"
-                    android:background="@drawable/bg_pill"
+                    android:background="@drawable/bg_pill_ripple"
                     android:backgroundTint="@color/overlay_chip"
                     android:contentDescription="@string/search_destination"
                     android:elevation="4dp"
@@ -170,7 +172,7 @@
                     android:layout_width="44dp"
                     android:layout_height="44dp"
                     android:layout_marginEnd="10dp"
-                    android:background="@drawable/bg_pill"
+                    android:background="@drawable/bg_pill_ripple"
                     android:backgroundTint="@color/overlay_chip"
                     android:contentDescription="@string/session_history"
                     android:elevation="4dp"
@@ -182,7 +184,7 @@
                     android:layout_width="44dp"
                     android:layout_height="44dp"
                     android:layout_marginEnd="10dp"
-                    android:background="@drawable/bg_pill"
+                    android:background="@drawable/bg_pill_ripple"
                     android:backgroundTint="@color/overlay_chip"
                     android:contentDescription="@string/map_theme"
                     android:elevation="4dp"
@@ -193,7 +195,7 @@
                     android:id="@+id/btnSettings"
                     android:layout_width="44dp"
                     android:layout_height="44dp"
-                    android:background="@drawable/bg_pill"
+                    android:background="@drawable/bg_pill_ripple"
                     android:backgroundTint="@color/overlay_chip"
                     android:contentDescription="@string/settings"
                     android:elevation="4dp"
@@ -406,6 +408,7 @@
 
         <!-- Floating Controls Above Bottom Sheet -->
         <LinearLayout
+            android:id="@+id/floatingControls"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="bottom|end"
@@ -530,7 +533,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         app:behavior_hideable="false"
-        app:behavior_peekHeight="96dp"
+        app:behavior_peekHeight="108dp"
         app:cardBackgroundColor="@color/overlay_card_glass"
         app:cardCornerRadius="28dp"
         app:cardElevation="16dp"
@@ -541,6 +544,7 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:animateLayoutChanges="true"
             android:orientation="vertical"
             android:paddingHorizontal="20dp"
             android:paddingTop="10dp"
@@ -548,10 +552,10 @@
 
             <!-- Drag Handle -->
             <View
-                android:layout_width="38dp"
-                android:layout_height="4dp"
+                android:layout_width="48dp"
+                android:layout_height="5dp"
                 android:layout_gravity="center_horizontal"
-                android:layout_marginBottom="12dp"
+                android:layout_marginBottom="14dp"
                 android:background="@drawable/bg_drag_handle" />
 
             <!-- Peek HUD Bar (Always visible in collapsed state) -->

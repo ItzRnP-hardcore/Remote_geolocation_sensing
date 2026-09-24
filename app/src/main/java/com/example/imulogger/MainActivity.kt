@@ -57,6 +57,15 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.widget.ImageView
 import android.widget.Button
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
+import android.animation.ValueAnimator
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
+import androidx.transition.ChangeBounds
+import androidx.transition.Fade
+import androidx.transition.TransitionManager
+import androidx.transition.TransitionSet
 import kotlinx.coroutines.delay
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.views.overlay.MapEventsOverlay
@@ -107,6 +116,16 @@ class MainActivity : AppCompatActivity() {
     private var currentMapOrientation = 0f
     private var latestKnownAzimuth = 0f
     private var lastGnssQuality: GnssQuality? = null
+
+    // Fluid UI animation state
+    private var lastRecordRunningState: Boolean? = null
+    private var recordColorAnimator: ValueAnimator? = null
+    private var currentDisplayedSpeed: Float = 0f
+    private var speedAnimator: ValueAnimator? = null
+    private var currentDriftColor: Int? = null
+    private var driftColorAnimator: ValueAnimator? = null
+    private var isFabPulsing = false
+    private var fabPulseAnimator: ObjectAnimator? = null
 
     private var sensorManager: SensorManager? = null
     private var rotationSensor: Sensor? = null
@@ -218,9 +237,21 @@ class MainActivity : AppCompatActivity() {
             isHideable = false
             addBottomSheetCallback(object : BottomSheetBehavior.BottomSheetCallback() {
                 override fun onStateChanged(bottomSheet: View, newState: Int) {
+                    val wasExpanded = panelExpanded
                     panelExpanded = (newState == BottomSheetBehavior.STATE_EXPANDED)
+                    if (wasExpanded != panelExpanded && (newState == BottomSheetBehavior.STATE_EXPANDED || newState == BottomSheetBehavior.STATE_COLLAPSED)) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                        } else {
+                            hapticTick()
+                        }
+                    }
                 }
-                override fun onSlide(bottomSheet: View, slideOffset: Float) {}
+                override fun onSlide(bottomSheet: View, slideOffset: Float) {
+                    val shift = slideOffset.coerceIn(0f, 1f) * 160f * resources.displayMetrics.density
+                    binding.floatingControls.translationY = -shift
+                    binding.floatingControls.alpha = 1f - (slideOffset.coerceIn(0f, 1f) * 0.25f)
+                }
             })
         }
 
@@ -264,6 +295,18 @@ class MainActivity : AppCompatActivity() {
 
         binding.fabCentre.setOnClickListener {
             hapticClick()
+            binding.fabCentre.animate()
+                .scaleX(1.15f)
+                .scaleY(1.15f)
+                .setDuration(100)
+                .withEndAction {
+                    binding.fabCentre.animate()
+                        .scaleX(1.0f)
+                        .scaleY(1.0f)
+                        .setDuration(100)
+                        .start()
+                }
+                .start()
             centreOnMe()
         }
 
@@ -344,6 +387,11 @@ class MainActivity : AppCompatActivity() {
             locationWatcherRegistered = false
         }
         unregisterReceiver(downloadReceiver)
+        recordColorAnimator?.cancel()
+        speedAnimator?.cancel()
+        driftColorAnimator?.cancel()
+        fabPulseAnimator?.cancel()
+        isFabPulsing = false
         super.onStop()
     }
 
@@ -489,7 +537,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun longPressHelper(p: GeoPoint): Boolean {
-                hapticClick()
+                hapticLongPress()
                 navigateTo(p, "Pinned Destination")
                 return true
             }
@@ -1201,7 +1249,7 @@ class MainActivity : AppCompatActivity() {
         if (status.error != null && !panelExpanded) setPanelExpanded(true)
 
         val speedKmh = if (status.running && status.lastSpeedMps != null) status.lastSpeedMps * 3.6f else 0f
-        binding.tvPeekSpeed.text = String.format(Locale.US, "%.0f km/h", speedKmh)
+        animateSpeed(speedKmh)
         binding.tvPeekDrift.text = if (status.running && status.drLat != null) {
             String.format(Locale.US, "drift: %.0f m", status.driftMetres)
         } else {
@@ -1213,6 +1261,7 @@ class MainActivity : AppCompatActivity() {
             hasFineLocation() -> getString(R.string.start)
             else -> getString(R.string.grant_permissions)
         }
+        updateRecordButtonState(status.running)
 
         maybeAutoPrefetch(status)
         updateCoverageHint(status)
@@ -1282,20 +1331,19 @@ class MainActivity : AppCompatActivity() {
         // Colour against the plan's benchmark once there is enough distance for the ratio to
         // mean anything, and fall back to absolute thresholds before that.
         val pct = status.driftPercent
-        binding.mDrift.setTextColor(
-            ContextCompat.getColor(
-                this,
-                when {
-                    !status.running || status.drLat == null -> R.color.quality_idle
-                    pct != null && pct > DRIFT_BENCHMARK_PERCENT -> R.color.quality_lost
-                    pct != null && pct > DRIFT_BENCHMARK_PERCENT / 2 -> R.color.quality_weak
-                    pct != null -> R.color.quality_good
-                    status.driftMetres > 100 -> R.color.quality_lost
-                    status.driftMetres > 25 -> R.color.quality_weak
-                    else -> R.color.quality_good
-                },
-            )
+        val targetDriftColor = ContextCompat.getColor(
+            this,
+            when {
+                !status.running || status.drLat == null -> R.color.quality_idle
+                pct != null && pct > DRIFT_BENCHMARK_PERCENT -> R.color.quality_lost
+                pct != null && pct > DRIFT_BENCHMARK_PERCENT / 2 -> R.color.quality_weak
+                pct != null -> R.color.quality_good
+                status.driftMetres > 100 -> R.color.quality_lost
+                status.driftMetres > 25 -> R.color.quality_weak
+                else -> R.color.quality_good
+            },
         )
+        animateDriftColor(targetDriftColor)
 
         binding.mDriftPercent.text = when {
             !status.running || status.drLat == null -> ""
@@ -1348,6 +1396,7 @@ class MainActivity : AppCompatActivity() {
                 ?: status.sessionPath?.let { "Last session: " + it.substringAfterLast('/') }
                 ?: "Sessions are written to Android/data/$packageName/files/sessions/"
         }
+        updateFabCentrePulse(status.secondsSinceFix >= 0)
         // Smooth rotation is updated continuously at 25 Hz via SensorService.azimuth
     }
 
@@ -1356,7 +1405,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnToggleGps.setOnClickListener {
             hapticClick()
             showGpsTrack = !showGpsTrack
-            updateLayerToggleUI()
+            pulseToggle(binding.btnToggleGps, showGpsTrack)
             trackLine.isEnabled = showGpsTrack
             gpsQualityLines.forEach { it.isEnabled = showGpsTrack }
             binding.map.invalidate()
@@ -1364,7 +1413,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnToggleDr.setOnClickListener {
             hapticClick()
             showDrTrack = !showDrTrack
-            updateLayerToggleUI()
+            pulseToggle(binding.btnToggleDr, showDrTrack)
             drLine.isEnabled = showDrTrack
             drQualityLines.forEach { it.isEnabled = showDrTrack }
             binding.map.invalidate()
@@ -1372,7 +1421,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnToggleSnap.setOnClickListener {
             hapticClick()
             showSnapTrack = !showSnapTrack
-            updateLayerToggleUI()
+            pulseToggle(binding.btnToggleSnap, showSnapTrack)
             snapLine.isEnabled = showSnapTrack
             snapSegments.forEach { it.isEnabled = showSnapTrack }
             binding.map.invalidate()
@@ -1488,6 +1537,165 @@ class MainActivity : AppCompatActivity() {
         binding.root.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
     }
 
+    private fun hapticTick() {
+        binding.root.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    }
+
+    private fun hapticLongPress() {
+        binding.root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    private fun hapticConfirm() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            binding.root.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        } else {
+            binding.root.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        }
+    }
+
+    private fun slideDownView(view: View) {
+        if (view.visibility == View.VISIBLE && view.alpha == 1f) return
+        view.alpha = 0f
+        view.translationY = -40f * resources.displayMetrics.density
+        view.visibility = View.VISIBLE
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(260)
+            .setInterpolator(DecelerateInterpolator())
+            .setListener(null)
+            .start()
+    }
+
+    private fun slideUpView(view: View, onEnd: (() -> Unit)? = null) {
+        if (view.visibility != View.VISIBLE) return
+        view.animate()
+            .alpha(0f)
+            .translationY(-40f * resources.displayMetrics.density)
+            .setDuration(200)
+            .setInterpolator(AccelerateInterpolator())
+            .withEndAction {
+                view.visibility = View.GONE
+                view.translationY = 0f
+                onEnd?.invoke()
+            }
+            .start()
+    }
+
+    private fun animateSpeed(targetSpeedKmh: Float) {
+        if (Math.abs(targetSpeedKmh - currentDisplayedSpeed) < 0.5f) {
+            currentDisplayedSpeed = targetSpeedKmh
+            binding.tvPeekSpeed.text = String.format(Locale.US, "%.0f km/h", targetSpeedKmh)
+            return
+        }
+        speedAnimator?.cancel()
+        val from = currentDisplayedSpeed
+        speedAnimator = ValueAnimator.ofFloat(from, targetSpeedKmh).apply {
+            duration = 300
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { anim ->
+                val v = anim.animatedValue as Float
+                currentDisplayedSpeed = v
+                binding.tvPeekSpeed.text = String.format(Locale.US, "%.0f km/h", v)
+            }
+            start()
+        }
+    }
+
+    private fun updateRecordButtonState(running: Boolean) {
+        val targetColor = ContextCompat.getColor(
+            this,
+            if (running) R.color.action_armed else R.color.action_record
+        )
+        if (lastRecordRunningState == null) {
+            lastRecordRunningState = running
+            binding.btnRecord.backgroundTintList = ColorStateList.valueOf(targetColor)
+            return
+        }
+        if (lastRecordRunningState != running) {
+            val fromColor = ContextCompat.getColor(
+                this,
+                if (running) R.color.action_record else R.color.action_armed
+            )
+            lastRecordRunningState = running
+            recordColorAnimator?.cancel()
+            recordColorAnimator = ValueAnimator.ofArgb(fromColor, targetColor).apply {
+                duration = 300
+                addUpdateListener { anim ->
+                    binding.btnRecord.backgroundTintList = ColorStateList.valueOf(anim.animatedValue as Int)
+                }
+                start()
+            }
+        }
+    }
+
+    private fun animateDriftColor(targetColor: Int) {
+        val from = currentDriftColor ?: targetColor
+        if (from == targetColor && currentDriftColor != null) {
+            binding.mDrift.setTextColor(targetColor)
+            return
+        }
+        currentDriftColor = targetColor
+        driftColorAnimator?.cancel()
+        driftColorAnimator = ValueAnimator.ofArgb(from, targetColor).apply {
+            duration = 300
+            addUpdateListener { anim ->
+                val c = anim.animatedValue as Int
+                binding.mDrift.setTextColor(c)
+            }
+            start()
+        }
+    }
+
+    private fun updateFabCentrePulse(hasFix: Boolean) {
+        if (!hasFix) {
+            if (!isFabPulsing) {
+                isFabPulsing = true
+                val scaleX = PropertyValuesHolder.ofFloat(View.SCALE_X, 1.0f, 1.10f, 1.0f)
+                val scaleY = PropertyValuesHolder.ofFloat(View.SCALE_Y, 1.0f, 1.10f, 1.0f)
+                fabPulseAnimator = ObjectAnimator.ofPropertyValuesHolder(binding.fabCentre, scaleX, scaleY).apply {
+                    duration = 1400
+                    repeatCount = ValueAnimator.INFINITE
+                    repeatMode = ValueAnimator.RESTART
+                    start()
+                }
+            }
+        } else {
+            if (isFabPulsing) {
+                isFabPulsing = false
+                fabPulseAnimator?.cancel()
+                fabPulseAnimator = null
+                binding.fabCentre.scaleX = 1.0f
+                binding.fabCentre.scaleY = 1.0f
+            }
+        }
+    }
+
+    private fun pulseToggle(view: View, active: Boolean) {
+        if (active) {
+            view.animate()
+                .scaleX(1.12f)
+                .scaleY(1.12f)
+                .alpha(1.0f)
+                .setDuration(120)
+                .withEndAction {
+                    view.animate()
+                        .scaleX(1.0f)
+                        .scaleY(1.0f)
+                        .setDuration(120)
+                        .start()
+                }
+                .start()
+        } else {
+            view.animate()
+                .scaleX(1.0f)
+                .scaleY(1.0f)
+                .alpha(0.35f)
+                .setDuration(150)
+                .start()
+        }
+    }
+
     private fun showHistoryDialog() {
         hapticClick()
         val sheet = BottomSheetDialog(this)
@@ -1503,18 +1711,25 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val sessions = SessionManager.listSessions(this@MainActivity)
-            loading.visibility = View.GONE
-            if (sessions.isEmpty()) {
-                empty.visibility = View.VISIBLE
-                tvCount.text = "0 sessions"
-            } else {
-                empty.visibility = View.GONE
-                tvCount.text = "${sessions.size} session${if (sessions.size > 1) "s" else ""}"
-                rv.adapter = SessionHistoryAdapter(sessions) { selected ->
-                    sheet.dismiss()
-                    loadAndDisplayHistory(selected)
+            loading.animate().alpha(0f).setDuration(150).withEndAction {
+                loading.visibility = View.GONE
+                if (sessions.isEmpty()) {
+                    empty.alpha = 0f
+                    empty.visibility = View.VISIBLE
+                    empty.animate().alpha(1f).setDuration(200).start()
+                    tvCount.text = "0 sessions"
+                } else {
+                    empty.visibility = View.GONE
+                    tvCount.text = "${sessions.size} session${if (sessions.size > 1) "s" else ""}"
+                    rv.alpha = 0f
+                    rv.visibility = View.VISIBLE
+                    rv.adapter = SessionHistoryAdapter(sessions) { selected ->
+                        sheet.dismiss()
+                        loadAndDisplayHistory(selected)
+                    }
+                    rv.animate().alpha(1f).setDuration(200).start()
                 }
-            }
+            }.start()
         }
         sheet.show()
     }
@@ -1551,7 +1766,7 @@ class MainActivity : AppCompatActivity() {
             val durSec = summary.durationSeconds.toLong()
             val durStr = String.format(Locale.US, "%d:%02d", durSec / 60, durSec % 60)
             binding.tvHistoryStats.text = "$durStr · ${compact(summary.imuSamples)} IMU · ${summary.gpsFixes} GPS fixes"
-            binding.historyBanner.visibility = View.VISIBLE
+            slideDownView(binding.historyBanner)
             binding.historyRecomputeProgress.visibility = View.GONE
             binding.btnRecompute.isEnabled = true
             binding.btnRecompute.visibility = if (File(summary.dir, "imu.csv").exists()) View.VISIBLE else View.GONE
@@ -1610,7 +1825,7 @@ class MainActivity : AppCompatActivity() {
         hapticClick()
         isViewingHistory = false
         historySession = null
-        binding.historyBanner.visibility = View.GONE
+        slideUpView(binding.historyBanner)
         binding.historyRecomputeProgress.visibility = View.GONE
 
         marker.isEnabled = true
@@ -1858,7 +2073,7 @@ class MainActivity : AppCompatActivity() {
             if (tracker.done) {
                 if (!figure8.complete) {
                     figure8.complete = true
-                    hapticClick()
+                    hapticConfirm()
                 }
                 tvProgress.text = getString(R.string.calibration_progress_done)
                 btnContinue.isEnabled = true
@@ -1946,7 +2161,11 @@ class MainActivity : AppCompatActivity() {
                             ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
                         val results = NavigationRouter.searchPlaces(query, loc?.latitude, loc?.longitude)
                         if (results.isNotEmpty()) {
-                            binding.suggestionsCard.visibility = View.VISIBLE
+                            if (binding.suggestionsCard.visibility != View.VISIBLE) {
+                                binding.suggestionsCard.alpha = 0f
+                                binding.suggestionsCard.visibility = View.VISIBLE
+                                binding.suggestionsCard.animate().alpha(1f).setDuration(180).start()
+                            }
                             binding.rvSearchSuggestions.visibility = View.VISIBLE
                             binding.rvSearchSuggestions.adapter = SearchSuggestionAdapter(results, loc) { selected ->
                                 binding.etSearchDestination.setText(selected.title)
@@ -1982,6 +2201,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setSearchExpanded(expanded: Boolean) {
+        val transition = TransitionSet().apply {
+            addTransition(ChangeBounds())
+            addTransition(Fade())
+            duration = 200
+        }
+        TransitionManager.beginDelayedTransition(binding.topBar, transition)
+
         if (expanded) {
             binding.btnSearchExpand.visibility = View.GONE
             binding.layoutSearchExpanded.visibility = View.VISIBLE
@@ -2014,7 +2240,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        binding.navHudCard.visibility = View.VISIBLE
+        slideDownView(binding.navHudCard)
         binding.tvNavTitle.text = title
         binding.tvNavStats.text = "Calculating route…"
 
@@ -2070,7 +2296,7 @@ class MainActivity : AppCompatActivity() {
         destinationMarker?.isEnabled = false
         routeLine.setPoints(emptyList())
         routeLine.isEnabled = false
-        binding.navHudCard.visibility = View.GONE
+        slideUpView(binding.navHudCard)
         setSearchExpanded(false)
         binding.etSearchDestination.text?.clear()
         binding.suggestionsCard.visibility = View.GONE
