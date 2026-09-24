@@ -107,7 +107,12 @@ object NavigationRouter {
 
     /**
      * Compute shortest drivable path between [start] and [dest].
-     * Tries offline A* search on [roadNetwork] first, then falls back to OSRM.
+     *
+     * Tries offline A* over a corridor-based road graph first — the corridor spans the full
+     * bounding box between start and destination at z13–z15 depending on distance, so routes
+     * up to 200+ km are resolved entirely on-device from the installed Mapsforge `.map` file.
+     * Falls back to OSRM only if the offline graph yields no path (e.g., destination is outside
+     * the installed map coverage).
      */
     suspend fun calculateRoute(
         start: GeoPoint,
@@ -115,20 +120,30 @@ object NavigationRouter {
         roadNetwork: RoadNetwork? = null,
         destinationName: String? = null,
     ): NavRoute? = withContext(Dispatchers.IO) {
-        // 1. Try Offline A* routing on local RoadGraph
+        // 1. Offline A* over a corridor graph spanning start → dest
         if (roadNetwork != null) {
             try {
-                val graph = roadNetwork.graphNear(start.latitude, start.longitude)
+                val graph = roadNetwork.graphForRoute(
+                    start.latitude, start.longitude,
+                    dest.latitude, dest.longitude,
+                )
                 if (graph != null) {
                     val offlineResult = graph.findPath(
                         start.latitude, start.longitude,
                         dest.latitude, dest.longitude,
+                        snapRadiusM = 1000.0,   // wider snap for long-range endpoint matching
                     )
                     if (offlineResult != null && offlineResult.points.isNotEmpty()) {
                         val geoPoints = offlineResult.points.map { GeoPoint(it.lat, it.lon) }
-                        val speedAssumedMps = 10.0 // ~36 km/h assumed average road speed
+                        // Longer routes use highways; scale assumed speed accordingly.
+                        val speedAssumedMps = when {
+                            offlineResult.distanceM < 10_000  -> 10.0   // ~36 km/h city
+                            offlineResult.distanceM < 50_000  -> 14.0   // ~50 km/h suburban
+                            else                              -> 18.0   // ~65 km/h highway
+                        }
                         val dur = offlineResult.distanceM / speedAssumedMps
-                        Log.i(TAG, "Found offline A* route: ${offlineResult.distanceM.toInt()}m")
+                        Log.i(TAG, "Found offline A* route: ${offlineResult.distanceM.toInt()}m, " +
+                                "${graph.segments.size} segments, ${graph.nodeCount} nodes")
                         return@withContext NavRoute(
                             points = geoPoints,
                             distanceM = offlineResult.distanceM,
