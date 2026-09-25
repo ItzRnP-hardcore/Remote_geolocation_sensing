@@ -89,6 +89,8 @@ class MainActivity : AppCompatActivity() {
     private var destinationMarker: Marker? = null
     private var activeDestination: GeoPoint? = null
     private var activeDestinationName: String? = null
+    private var selectedStartPoint: GeoPoint? = null
+    private var selectedDestPoint: GeoPoint? = null
     private var roadNetwork: RoadNetwork? = null
     private lateinit var marker: Marker
     private lateinit var drMarker: Marker
@@ -537,6 +539,20 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun longPressHelper(p: GeoPoint): Boolean {
+                if (binding.layoutSearchExpanded.visibility == View.VISIBLE) {
+                    val focused = currentFocus
+                    if (focused == binding.etSearchStart) {
+                        hapticLongPress()
+                        selectedStartPoint = p
+                        binding.etSearchStart.setText(String.format(java.util.Locale.US, "%.5f, %.5f", p.latitude, p.longitude))
+                        return true
+                    } else if (focused == binding.etSearchDestination) {
+                        hapticLongPress()
+                        selectedDestPoint = p
+                        binding.etSearchDestination.setText(String.format(java.util.Locale.US, "%.5f, %.5f", p.latitude, p.longitude))
+                        return true
+                    }
+                }
                 hapticLongPress()
                 navigateTo(p, "Pinned Destination")
                 return true
@@ -2147,14 +2163,24 @@ class MainActivity : AppCompatActivity() {
             setSearchExpanded(false)
         }
 
-        binding.etSearchDestination.addTextChangedListener(object : TextWatcher {
+        val textWatcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
                 val query = s?.toString()?.trim().orEmpty()
-                binding.btnClearSearch.visibility = if (query.isNotEmpty()) View.VISIBLE else View.GONE
+                val focused = currentFocus
+                
+                if (focused == binding.etSearchStart && selectedStartPoint != null && !query.contains(",")) {
+                    selectedStartPoint = null
+                }
+                if (focused == binding.etSearchDestination && selectedDestPoint != null && !query.contains(",")) {
+                    selectedDestPoint = null
+                }
+
+                binding.btnClearSearch.visibility = if (binding.etSearchStart.text.isNotEmpty() || binding.etSearchDestination.text.isNotEmpty()) View.VISIBLE else View.GONE
+                
                 searchJob?.cancel()
-                if (query.length >= 3) {
+                if (query.length >= 3 && focused != null && (focused == binding.etSearchStart || focused == binding.etSearchDestination)) {
                     searchJob = lifecycleScope.launch {
                         delay(350)
                         val loc = marker.position
@@ -2168,12 +2194,17 @@ class MainActivity : AppCompatActivity() {
                             }
                             binding.rvSearchSuggestions.visibility = View.VISIBLE
                             binding.rvSearchSuggestions.adapter = SearchSuggestionAdapter(results, loc) { selected ->
-                                binding.etSearchDestination.setText(selected.title)
+                                val pt = GeoPoint(selected.lat, selected.lon)
+                                if (focused == binding.etSearchStart) {
+                                    selectedStartPoint = pt
+                                    binding.etSearchStart.setText(selected.title)
+                                } else if (focused == binding.etSearchDestination) {
+                                    selectedDestPoint = pt
+                                    binding.etSearchDestination.setText(selected.title)
+                                }
                                 binding.suggestionsCard.visibility = View.GONE
                                 binding.rvSearchSuggestions.visibility = View.GONE
                                 hideKeyboard()
-                                setSearchExpanded(false)
-                                navigateTo(GeoPoint(selected.lat, selected.lon), selected.title)
                             }
                         } else {
                             binding.suggestionsCard.visibility = View.GONE
@@ -2185,13 +2216,40 @@ class MainActivity : AppCompatActivity() {
                     binding.rvSearchSuggestions.visibility = View.GONE
                 }
             }
-        })
+        }
+
+        binding.etSearchStart.addTextChangedListener(textWatcher)
+        binding.etSearchDestination.addTextChangedListener(textWatcher)
 
         binding.btnClearSearch.setOnClickListener {
             hapticClick()
-            binding.etSearchDestination.text?.clear()
+            val focused = currentFocus
+            if (focused == binding.etSearchStart) {
+                binding.etSearchStart.text?.clear()
+                selectedStartPoint = null
+            } else if (focused == binding.etSearchDestination) {
+                binding.etSearchDestination.text?.clear()
+                selectedDestPoint = null
+            } else {
+                binding.etSearchStart.text?.clear()
+                binding.etSearchDestination.text?.clear()
+                selectedStartPoint = null
+                selectedDestPoint = null
+            }
             binding.suggestionsCard.visibility = View.GONE
             binding.rvSearchSuggestions.visibility = View.GONE
+        }
+
+        binding.btnNavigate.setOnClickListener {
+            hapticClick()
+            val dest = selectedDestPoint
+            if (dest != null) {
+                val title = binding.etSearchDestination.text.toString().takeIf { it.isNotBlank() && !it.contains(",") } ?: "Destination"
+                setSearchExpanded(false)
+                navigateTo(dest, title, selectedStartPoint)
+            } else {
+                Toast.makeText(this@MainActivity, "Please select a destination", Toast.LENGTH_SHORT).show()
+            }
         }
 
         binding.btnExitNav.setOnClickListener {
@@ -2227,7 +2285,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun navigateTo(dest: GeoPoint, title: String) {
+    private fun navigateTo(dest: GeoPoint, title: String, manualStart: GeoPoint? = null) {
         activeDestination = dest
         activeDestinationName = title
 
@@ -2244,7 +2302,8 @@ class MainActivity : AppCompatActivity() {
         binding.tvNavTitle.text = title
         binding.tvNavStats.text = "Calculating route…"
 
-        val start = marker.position
+        val start = manualStart
+            ?: marker.position
             ?: (if (::locationOverlay.isInitialized) locationOverlay.myLocation else null)
             ?: SensorService.status.value.let { s ->
                 if (s.lastLat != null && s.lastLon != null) GeoPoint(s.lastLat, s.lastLon) else null
@@ -2298,7 +2357,10 @@ class MainActivity : AppCompatActivity() {
         routeLine.isEnabled = false
         slideUpView(binding.navHudCard)
         setSearchExpanded(false)
+        binding.etSearchStart.text?.clear()
         binding.etSearchDestination.text?.clear()
+        selectedStartPoint = null
+        selectedDestPoint = null
         binding.suggestionsCard.visibility = View.GONE
         binding.rvSearchSuggestions.visibility = View.GONE
         hideKeyboard()

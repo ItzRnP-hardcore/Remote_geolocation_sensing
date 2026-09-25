@@ -107,58 +107,110 @@
                 <LinearLayout
                     android:id="@+id/layoutSearchExpanded"
                     android:layout_width="0dp"
-                    android:layout_height="44dp"
+                    android:layout_height="wrap_content"
                     android:layout_marginEnd="10dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_pill"
                     android:backgroundTint="@color/overlay_card_glass"
                     android:elevation="4dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
+                    android:orientation="vertical"
                     android:paddingHorizontal="12dp"
+                    android:paddingVertical="6dp"
                     android:visibility="gone">
 
-                    <ImageView
-                        android:layout_width="18dp"
-                        android:layout_height="18dp"
-                        android:src="@drawable/ic_search"
-                        app:tint="@color/brand" />
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="40dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
 
-                    <EditText
-                        android:id="@+id/etSearchDestination"
-                        android:layout_width="0dp"
-                        android:layout_height="match_parent"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:background="@null"
-                        android:hint="@string/search_destination"
-                        android:imeOptions="actionSearch"
-                        android:inputType="text"
-                        android:maxLines="1"
-                        android:singleLine="true"
-                        android:textColor="@color/on_overlay_primary"
-                        android:textColorHint="@color/on_overlay_muted"
-                        android:textSize="13sp" />
+                        <ImageView
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:src="@drawable/ic_search"
+                            app:tint="@color/brand" />
 
-                    <ImageButton
-                        android:id="@+id/btnClearSearch"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:background="?attr/selectableItemBackgroundBorderless"
-                        android:contentDescription="@string/cancel"
-                        android:src="@drawable/ic_close"
-                        android:visibility="gone"
-                        app:tint="@color/on_overlay_muted" />
+                        <EditText
+                            android:id="@+id/etSearchStart"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_marginStart="8dp"
+                            android:layout_weight="1"
+                            android:background="@null"
+                            android:hint="Start (type or long-press map)"
+                            android:imeOptions="actionNext"
+                            android:inputType="text"
+                            android:maxLines="1"
+                            android:singleLine="true"
+                            android:textColor="@color/on_overlay_primary"
+                            android:textColorHint="@color/on_overlay_muted"
+                            android:textSize="13sp" />
 
-                    <ImageButton
-                        android:id="@+id/btnCloseSearch"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:layout_marginStart="4dp"
-                        android:background="?attr/selectableItemBackgroundBorderless"
-                        android:contentDescription="@string/cancel"
-                        android:src="@drawable/ic_close"
-                        app:tint="@color/on_overlay_secondary" />
+                        <ImageButton
+                            android:id="@+id/btnClearSearch"
+                            android:layout_width="28dp"
+                            android:layout_height="28dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/cancel"
+                            android:src="@drawable/ic_close"
+                            android:visibility="gone"
+                            app:tint="@color/on_overlay_muted" />
+
+                        <ImageButton
+                            android:id="@+id/btnCloseSearch"
+                            android:layout_width="28dp"
+                            android:layout_height="28dp"
+                            android:layout_marginStart="4dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/cancel"
+                            android:src="@drawable/ic_close"
+                            app:tint="@color/on_overlay_secondary" />
+                    </LinearLayout>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginVertical="2dp"
+                        android:background="@color/overlay_stroke_subtle" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="40dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <ImageView
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:src="@drawable/ic_navigation"
+                            app:tint="@color/action_record" />
+
+                        <EditText
+                            android:id="@+id/etSearchDestination"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_marginStart="8dp"
+                            android:layout_weight="1"
+                            android:background="@null"
+                            android:hint="Dest (type or long-press map)"
+                            android:imeOptions="actionDone"
+                            android:inputType="text"
+                            android:maxLines="1"
+                            android:singleLine="true"
+                            android:textColor="@color/on_overlay_primary"
+                            android:textColorHint="@color/on_overlay_muted"
+                            android:textSize="13sp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnNavigate"
+                            android:layout_width="wrap_content"
+                            android:layout_height="32dp"
+                            android:text="Nav"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            app:backgroundTint="@color/action_record"
+                            app:cornerRadius="8dp" />
+                    </LinearLayout>
                 </LinearLayout>
 
                 <Space
