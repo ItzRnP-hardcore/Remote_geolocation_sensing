@@ -40,10 +40,12 @@ ml_model/model_cen*.pth
 # ml_model/export_model.py turns into the shipped asset; everything else here is an
 # ablation that build_dataset + train_iovnbd reproduce from the zips in dataset/.
 ml_model/model_tcn_*.pth
-!ml_model/model_tcn_base_fx.pth
+!ml_model/model_tcn_finetuned.pth
 ml_model/train_sweep.log
 ml_model/train_iovnbd_results_s*.json
 ml_model/seed*.log
+logcat.txt
+*.logcat
 
 # Sweep artefacts: derived datasets (~34 MB each), per-config logs and result files.
 # All regenerable from dataset/IO-VNBD_original via eval/iovnbd.py and

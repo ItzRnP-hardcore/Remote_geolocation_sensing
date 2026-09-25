@@ -20,7 +20,7 @@ exported across that gap produces confident nonsense rather than an error.
 vehicle-frame model unless `--i-know-the-app-feeds-earth` is passed, because
 this has silently shipped once already.
 
-Run:  python -m ml_model.export_model --weights ml_model/model_tcn_base_fx.pth \
+Run:  python -m ml_model.export_model --weights ml_model/model_tcn_finetuned.pth \
           --frame earth --out app/src/main/assets/model_mobile.pt
 """
 
@@ -35,7 +35,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tcn_model import IN_CHANNELS, WINDOW_SAMPLES, TCNModel  # noqa: E402
 
-DEFAULT_WEIGHTS = os.path.join("ml_model", "model_tcn_base_fx.pth")
+DEFAULT_WEIGHTS = os.path.join("ml_model", "model_tcn_finetuned.pth")
 DEFAULT_EXPORT = os.path.join("ml_model", "model_mobile.pt")
 HEADS = ("mu", "logvar", "stationary_logit", "yaw_rate")
 

@@ -4,7 +4,7 @@ This creates a wrapper around TCNModel that includes methods for `forward_train`
 `backward`, and `step`, allowing Android to update the weights using its own
 collected ground-truth (e.g. GPS data).
 
-Run:  python -m ml_model.export_training_model --weights ml_model/model_tcn_base_fx.pth \
+Run:  python -m ml_model.export_training_model --weights ml_model/model_tcn_finetuned.pth \
           --frame earth --out app/src/main/assets/model_mobile_train.pt
 """
 
